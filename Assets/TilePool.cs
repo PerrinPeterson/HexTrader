@@ -4,6 +4,7 @@ using UnityEditor.Rendering;
 using UnityEngine;
 using UnityEngine.Analytics;
 using UnityEngine.Timeline;
+using UnityEngine.UIElements;
 
 //Wrapper class to hold a tile, ease of assigning textures, because good god.
 public static class TileWrapper
@@ -99,11 +100,15 @@ public class TilePool : MonoBehaviour
     public Vector2 moveOffset = new Vector2(0, 0);
     private Vector2Int playmatSize;
     public Vector2Int BottomLeftMapCoord = new Vector2Int(0, 0);
+    private int BottomLeftMapIndex;
+    public Vector3Int BottomLeftCubeCoord = new Vector3Int(0, 0, 0);
     public WorldManager worldManager;
-    private Vector2Int[] neighborTilesTable;
+    private HexGrid playmat;
+    private Vector3Int[] neighborTilesTable;
     private List<Renderer> rendererCache;
     private Material[][] matCache;
     public int RenderCacheSize;
+    public Vector3Int DebugTile = new Vector3Int(-1, -1, -1);
     // Start is called once before the first execution of Update after the MonoBehaviour is created
     void Start()
     {
@@ -149,15 +154,20 @@ public class TilePool : MonoBehaviour
             GameObject newTile = Instantiate(tile, transform);
             newTile.SetActive(false);
             newTile.transform.rotation = Quaternion.Euler(90, 0, 0); //orient the tile to be flat on the ground, TODO: fix this in the prefab itself
+            newTile.AddComponent<TileData>();
             tiles.Add(newTile);
             rendererCache.Add(newTile.GetComponent<Renderer>());
         }
+
     }
 
     public void PlaceAroundCenter(Vector2 centerPosition, Vector2Int playMatSize, Vector2Int centerStartCoords)
     {
         BottomLeftMapCoord = new Vector2Int(centerStartCoords.x - playMatSize.x / 2, centerStartCoords.y - playMatSize.y / 2);
         playmatSize = new Vector2Int(playMatSize.x, playMatSize.y);
+        playmat = new HexGrid(playmatSize.x, playmatSize.y);
+        playmat.oddR = false;
+
 
         Vector2 firstTileOffset;
         float x = centerPosition.x - (tileWidth * playMatSize.x) / 2 + tileWidth / 2;
@@ -179,10 +189,13 @@ public class TilePool : MonoBehaviour
                 }
                 tiles[tileIndex].transform.position = new Vector3(offset.x, 0, offset.y);
                 tiles[tileIndex].SetActive(true);
+
+                tiles[tileIndex].GetComponent<TileData>().gridPos = worldManager.world.OddRToCube(BottomLeftMapCoord.x + col, BottomLeftMapCoord.y + row);
+                tiles[tileIndex].GetComponent<TileData>().playmatPos = playmat.OddRToCube(col, row);
                 tileIndex++;
             }
         }
-        neighborTilesTable = new Vector2Int[playmatSize.x * playmatSize.y * 6];
+        neighborTilesTable = new Vector3Int[playmatSize.x * playmatSize.y * 6];
         matCache = new Material[playmatSize.x * playmatSize.y][];
         FetchTiles();
     }
@@ -210,6 +223,7 @@ public class TilePool : MonoBehaviour
             }
             moveOffset.x += tileWidth;
             BottomLeftMapCoord.x += 1;
+
         }
         else if (direction.x == 1)
         {
@@ -232,6 +246,7 @@ public class TilePool : MonoBehaviour
         {
             int startIndex = (playMatHeight - 1) * playMatWidth;
             float additionalOffsetX = 0;
+            playmat.oddR = !playmat.oddR; //Flip the oddR state, since we're moving the rows
 
             if (playMatHeight % 2 == 1)
             {
@@ -269,6 +284,7 @@ public class TilePool : MonoBehaviour
         {
             int startIndex = 0;
             float additionalOffsetX = 0;
+            playmat.oddR = !playmat.oddR; //Flip the oddR state, since we're moving the rows
 
             if (playMatHeight % 2 == 1)
             {
@@ -301,6 +317,12 @@ public class TilePool : MonoBehaviour
             moveOffset.y += rowOffset.y;
             BottomLeftMapCoord.y += 1;
         }
+        for (int i = 0; i < tiles.Count; i++)
+        {
+            tiles[i].GetComponent<TileData>().gridPos = worldManager.world.OddRToCube(BottomLeftMapCoord.x + (i % playMatWidth), BottomLeftMapCoord.y + (i / playMatWidth));
+            tiles[i].GetComponent<TileData>().playmatPos = playmat.OddRToCube(i % playMatWidth, i / playMatWidth);
+        }
+
         FetchTiles();
     }
 
@@ -330,17 +352,18 @@ public class TilePool : MonoBehaviour
                         textObj = new GameObject("CellValueText");
                         textObj.transform.SetParent(tiles[i].transform);
                         textObj.transform.localPosition = new Vector3(0, 0.1f, 0);
-                        textObj.transform.localRotation = Quaternion.Euler(180, 0, 180);
+                        textObj.transform.localRotation = Quaternion.Euler(0, 0, 0);
                         TextMesh textMesh = textObj.AddComponent<TextMesh>();
-                        textMesh.characterSize = 0.2f;
+                        textMesh.characterSize = 1.0f;
                         textMesh.anchor = TextAnchor.MiddleCenter;
                         textMesh.color = Color.white;
                     }
                     TextMesh existingTextMesh = textObj.GetComponent<TextMesh>();
+                    existingTextMesh.fontSize = 1;
                     int cellX = BottomLeftMapCoord.x + (i % playmatSize.x);
                     int cellY = BottomLeftMapCoord.y + (i / playmatSize.x);
-                    int cellValue = worldManager.world.GetCell(cellX, cellY);
-                    existingTextMesh.text = cellValue.ToString();
+                    Vector3Int vector3Int = worldManager.world.OddRToCube(cellY, cellX);
+                    existingTextMesh.text = vector3Int.ToString();
                 }
                 else
                 {
@@ -353,7 +376,8 @@ public class TilePool : MonoBehaviour
             }
             Renderer tileRenderer = rendererCache[i];
             Material[] sharedMats = tileRenderer.sharedMaterials;
-            
+
+            Vector3Int pos = playmat.IndexToCube(i);
 
             TileWrapper.SetCoreMaterial(tileMats[matIndex], sharedMats); //Main
             TileWrapper.SetEdge(tileMats[matIndex + 1], sharedMats, 0); //Edge A
@@ -367,12 +391,14 @@ public class TilePool : MonoBehaviour
         }
         RenderCacheSize = rendererCache.Count;
 
-        Vector2Int cellCoord = new Vector2Int(0, 0);
-        Vector2Int[] neighborCoords = new Vector2Int[6];
+        Vector2Int cellRowCol = new Vector2Int(0, 0);
+        Vector3Int cellCoord = new Vector3Int(0, 0, 0);
+        Vector3Int[] neighborCoords = new Vector3Int[6];
         for (int i = 0; i < tiles.Count; i++)
         {
-            cellCoord.x = BottomLeftMapCoord.x + (i % playmatSize.x);
-            cellCoord.y = BottomLeftMapCoord.y + (i / playmatSize.x);
+            cellRowCol.x = BottomLeftMapCoord.x + (i % playmatSize.x);
+            cellRowCol.y = BottomLeftMapCoord.y + (i / playmatSize.x);
+            cellCoord = worldManager.world.OddRToCube(cellRowCol.x, cellRowCol.y);
             worldManager.world.GetNeighbourCoords(cellCoord, ref neighborCoords);
             neighborTilesTable[i * 6 + 0] = neighborCoords[0]; //NE
             neighborTilesTable[i * 6 + 1] = neighborCoords[1]; //E
@@ -381,7 +407,6 @@ public class TilePool : MonoBehaviour
             neighborTilesTable[i * 6 + 4] = neighborCoords[4]; //W
             neighborTilesTable[i * 6 + 5] = neighborCoords[5]; //NW
         }
-
 
         //Second loop, blend the tiles. For example, if Tile A is up and the the right of B, and the C edge is beach on A, and the B edge is beach on B, we can set the corner of the edge between them to beach as well, so the beach is continuous.
         for (int i = 0; i < tiles.Count; i++)
@@ -400,15 +425,15 @@ public class TilePool : MonoBehaviour
                 continue;
             for (int edgeIndex = 0; edgeIndex < 6; edgeIndex++)
             {
-                Vector2Int neighborCoord = neighborTilesTable[i * 6 + neighbor1Index]; //The coord of the neighbour in the world
-                if (neighborCoord.x == -1 && neighborCoord.y == -1)
-                    continue;
-                Vector2Int neighborOneLocal = WorldCoordsToPlaymatCoords(neighborCoord); //Local coords in the playmat
-                
+                Vector3Int neighborCoord = neighborTilesTable[i * 6 + neighbor1Index]; //The coord of the neighbour in the world
+                Vector3Int neighborOneLocal = new Vector3Int(-1, -1, -1);
+                if (!(neighborCoord.x == -1 && neighborCoord.y == -1 && neighborCoord.z == -1))
+                    neighborOneLocal = WorldCoordsToPlaymatCoords(neighborCoord);
+
                 neighborCoord = neighborTilesTable[i * 6 + neighbor2Index];
-                if (neighborCoord.x == -1 && neighborCoord.y == -1)
-                    continue;
-                Vector2Int neighborTwoLocal = WorldCoordsToPlaymatCoords(neighborCoord);
+                Vector3Int neighborTwoLocal = new Vector3Int(-1, -1, -1);
+                if (!(neighborCoord.x == -1 && neighborCoord.y == -1 && neighborCoord.z == -1))
+                    neighborTwoLocal = WorldCoordsToPlaymatCoords(neighborCoord);
 
 
 
@@ -418,13 +443,20 @@ public class TilePool : MonoBehaviour
 
                 Renderer neighbor1Tile = null;
                 Renderer neighbor2Tile = null;
-
-                if (neighborOneLocal.x >= 0 && neighborOneLocal.y >= 0 && neighborOneLocal.x < playmatSize.x && neighborOneLocal.y < playmatSize.y)
-                    neighbor1Tile = rendererCache[neighborOneLocal.y * playmatSize.x + neighborOneLocal.x];
-                if (neighborTwoLocal.x >= 0 && neighborTwoLocal.y >= 0 && neighborTwoLocal.x < playmatSize.x && neighborTwoLocal.y < playmatSize.y)
-                    neighbor2Tile = rendererCache[neighborTwoLocal.y * playmatSize.x + neighborTwoLocal.x];
-                int neighbor1LocalIndex = neighborOneLocal.y * playmatSize.x + neighborOneLocal.x; //Index in the matCache and the rendererCache
-                int neighbor2LocalIndex = neighborTwoLocal.y * playmatSize.x + neighborTwoLocal.x; //Index in the matCache and the rendererCache
+                int neighbor1LocalIndex = 0; //Index in the matCache and the rendererCache
+                int neighbor2LocalIndex = 0; //Index in the matCache and the rendererCache
+                if (neighborOneLocal != new Vector3Int(-1, -1, -1)) //Invalid coord
+                {
+                    neighbor1LocalIndex = playmat.OddRToIndex(neighborOneLocal);
+                }
+                if (neighborTwoLocal != new Vector3Int(-1, -1, -1))
+                {
+                    neighbor2LocalIndex = playmat.OddRToIndex(neighborTwoLocal);
+                }
+                if (playmat.IsValidCoordinate(neighborOneLocal))
+                    neighbor1Tile = rendererCache[neighbor1LocalIndex];
+                if (playmat.IsValidCoordinate(neighborTwoLocal))
+                    neighbor2Tile = rendererCache[neighbor2LocalIndex];
                 //A little gross, but I can add a GetTileAtCoord function later to the TilePool to make this cleaner
                 Material currentEdgeMat = TileWrapper.GetEdge(edgeIndex, tileMatsCurrent);
                 if (neighbor1Tile != null)
@@ -439,11 +471,7 @@ public class TilePool : MonoBehaviour
                 if (neighbor2Tile != null)
                 {
                     Material neighbor2EdgeMat = TileWrapper.GetEdge(neighbor2CheckIndex, matCache[neighbor2LocalIndex]);
-                    if (neighbor2EdgeMat == null)
-                    {
-                        continue;
-                    }
-                    if (neighbor2EdgeMat == currentEdgeMat)
+                    if (neighbor2EdgeMat != null && neighbor2EdgeMat == currentEdgeMat)
                     {
                         //Set corner material
                         TileWrapper.SetEdge(currentEdgeMat, tileMatsCurrent, neighbor2Index, 0); //Corner on current tile
@@ -458,22 +486,11 @@ public class TilePool : MonoBehaviour
             tileRenderer.sharedMaterials = tileMatsCurrent;
         }
     }
-
-    GameObject GetTileAtWorldCoords(Vector2Int coords)
+    Vector3Int WorldCoordsToPlaymatCoords(Vector3Int worldCoords)
     {
-        int localx = coords.x - BottomLeftMapCoord.x;
-        int localy = coords.y - BottomLeftMapCoord.y;
+        BottomLeftCubeCoord = worldManager.world.OddRToCube(BottomLeftMapCoord.x, BottomLeftMapCoord.y);
+        Vector3Int delta = new Vector3Int(worldCoords.x - BottomLeftCubeCoord.x, worldCoords.y - BottomLeftCubeCoord.y, worldCoords.z - BottomLeftCubeCoord.z);
+        return delta;
 
-        if (localx < 0 || localx >= playmatSize.x || localy < 0 || localy >= playmatSize.y)
-            return null;
-        int tileIndex = localy * playmatSize.x + localx;
-        return tiles[tileIndex];
-    }
-
-    Vector2Int WorldCoordsToPlaymatCoords(Vector2Int worldCoords)
-    {
-        int localx = worldCoords.x - BottomLeftMapCoord.x;
-        int localy = worldCoords.y - BottomLeftMapCoord.y;
-        return new Vector2Int(localx, localy);
     }
 }

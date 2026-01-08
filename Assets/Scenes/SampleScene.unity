@@ -569,8 +569,10 @@ MonoBehaviour:
   rowOffset: {x: -0.5, y: 0.8660254}
   moveOffset: {x: 0, y: 0}
   BottomLeftMapCoord: {x: 0, y: 0}
+  BottomLeftCubeCoord: {x: 0, y: 0, z: 0}
   worldManager: {fileID: 814580880}
   RenderCacheSize: 0
+  DebugTile: {x: -1, y: -1, z: -1}
 --- !u!4 &1176430705
 Transform:
   m_ObjectHideFlags: 0
