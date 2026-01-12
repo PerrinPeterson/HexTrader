@@ -15,7 +15,7 @@ public class HexCloudGen : MonoBehaviour
         
     }
 
-    public HexGrid GenHexCloud(HexGrid grid, bool continuous = false, int numLayers = 4, int radius = 0)
+    public HexGrid GenHexCloud(HexGrid grid, TilePacker packer, bool continuous = false, int numLayers = 4, int radius = 0)
     {
         //Going to be a bit different than the cloud gen using a pixel based grid, but the idea is similar
         //Continuous will be implemented later
@@ -71,7 +71,6 @@ public class HexCloudGen : MonoBehaviour
                 layers[layerIndex][cellIndex] = cellDensity;
             }
         }
-
         for (int cellIndex = 0; cellIndex < grid.size(); cellIndex++)
         {
             float finalDensity = 0.0f;
@@ -82,6 +81,8 @@ public class HexCloudGen : MonoBehaviour
             //Set the final density into the grid
             int storedValue = Mathf.RoundToInt(Mathf.Clamp(finalDensity, 0, 1)); //TODO: Revert this back to Clamp01, just for testing
             grid.SetCell(grid.IndexToCube(cellIndex), storedValue);
+            packer.SetBiomes(new int[7] { storedValue, storedValue, storedValue, storedValue, storedValue, storedValue, storedValue }); //Poorly optimised, but works for now
+            grid.SetCellBin(grid.IndexToCube(cellIndex), packer.packedTile);
         }
 
         return grid;

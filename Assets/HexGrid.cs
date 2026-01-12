@@ -18,6 +18,7 @@ public class HexGrid
     private int height;
     //TODO: reprisent each hex in binary, for light storage and effeciency
     private int[] cells;
+    private ulong[] cellsBin;
     public bool oddR = true; //Whether the grid uses odd-r offset coordinates, currently only really used for checking if a coordinate is valid
     private Vector3Int[] neighborLookups = new Vector3Int[6] {
             new Vector3Int(0, -1, 1), //NE
@@ -35,6 +36,7 @@ public class HexGrid
         this.width = width;
         this.height = height;
         this.cells = new int[width * height];
+        this.cellsBin = new ulong[width * height];
     }
     public int GetCell(Vector3Int coord)
     {
@@ -49,6 +51,21 @@ public class HexGrid
     {
         if (IsValidCoordinate(coord))
             cells[OddRToIndex(coord)] = value;
+        else
+            throw new System.IndexOutOfRangeException("Invalid hex grid coordinates");
+    }
+    public ulong GetCellBin(Vector3Int coord)
+    {
+        ulong cell = ulong.MaxValue;
+        //OddR system
+        if (IsValidCoordinate(coord))
+            cell = cellsBin[OddRToIndex(coord)];
+        return cell;
+    }
+    public void SetCellBin(Vector3Int coord, ulong value)
+    {
+        if (IsValidCoordinate(coord))
+            cellsBin[OddRToIndex(coord)] = value;
         else
             throw new System.IndexOutOfRangeException("Invalid hex grid coordinates");
     }

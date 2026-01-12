@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Linq;
 using System.Security.Cryptography;
 using UnityEditor.ShaderGraph.Internal;
@@ -55,6 +56,7 @@ public class WorldManager : MonoBehaviour
     public Vector2Int MinMaxMountainStrength = new Vector2Int(3, 8); //a mountain spawner pushes other mountains up by a random amount in this range
 
     public bool debugMode = false;
+    public TilePacker tilePacker;
 
     // Start is called once before the first execution of Update after the MonoBehaviour is created
     void Start()
@@ -65,6 +67,7 @@ public class WorldManager : MonoBehaviour
     {
         world = new HexGrid(worldSize.x, worldSize.y);
         cloudGen = transform.GetComponent<HexCloudGen>();
+        tilePacker = new TilePacker(new int[7], matList.Count());
         GenerateWorld();
     }
 
@@ -78,10 +81,9 @@ public class WorldManager : MonoBehaviour
     {
         //temperary, just make each tile a grass tile for now
         //In future these will be a lot more complex, for now we'll just hard code.
-        //Water = 0, Grass = 1, Dessert = 2
+        //Water = 0, Grass = 1
 
-        world = cloudGen.GenHexCloud(world);
-
+        world = cloudGen.GenHexCloud(world, tilePacker);
         //Now we clean up the coast line, adding in beaches and shallows
         //If 4 or more adjacent tiles are different biomes, convert the tile to the border biome
         world = CleanCoastline(world);
@@ -90,6 +92,11 @@ public class WorldManager : MonoBehaviour
         world = AddForest(world);
 
         world = AddMountains(world);
+
+        //Apply the edge cases
+        world = ApplyEdges(world);
+
+        // world = CleanEdges(world); //Final pass to apply edge blending between biomes
     }
 
     public void Regen()
@@ -119,9 +126,6 @@ public class WorldManager : MonoBehaviour
             for (int n = 0; n < neighbors.Length; n++)
             {
                 Vector3Int nCoord = neighbors[n];
-                //Debug.Log(nCoord);
-                //if (nCoord == new Vector3Int(99, -200, 101))
-                //    Debug.Log("here");
                 int nCellValue = grid.GetCell(nCoord);
                 if (nCellValue != cell && nCellValue != -1)
                 {
@@ -144,6 +148,8 @@ public class WorldManager : MonoBehaviour
                             {
                                 case (int)BiomeType.Grass: //Grass
                                     grid.SetCell(cubeCoord, (int)BiomeType.Shallows); //Shallows
+                                    tilePacker.SetAllBiomes((int)BiomeType.Shallows);
+                                    grid.SetCellBin(cubeCoord, tilePacker.packedTile);
                                     break;
                             }
                             break;
@@ -152,71 +158,15 @@ public class WorldManager : MonoBehaviour
                             {
                                 case (int)BiomeType.Water: //Water
                                     grid.SetCell(cubeCoord, (int)BiomeType.Beach); //Beach
+                                    tilePacker.SetAllBiomes((int)BiomeType.Beach);
+                                    grid.SetCellBin(cubeCoord, tilePacker.packedTile);
                                     break;
                             }
                             break;
                     }
                 }
             }
-
-
         }
-        //for (int i = 0; i < grid.dimensions().x; i++)
-        //{
-        //    for (int j = 0; j < grid.dimensions().y; j++)
-        //    {
-        //        int cellValue = grid.GetCell(i, j);
-        //        if (cellValue == -1)
-        //            continue;
-        //        Vector2Int[] coords = new Vector2Int[6];
-        //        grid.GetNeighbourCoords(new Vector2Int(i, j), ref coords);
-        //        TileConfig tileConfig = new TileConfig();
-        //        tileConfig.biomes = new int[matList.Count];
-        //        tileConfig.defaultBiome = cellValue;
-        //        tileConfig.biomes[cellValue] = 6;
-        //        for (int n = 0; n < coords.Length; n++)
-        //        {
-        //            Vector2Int nCoord = coords[n];
-        //            int nCellValue = grid.GetCell(nCoord);
-        //            if (nCellValue != cellValue && nCellValue != -1)
-        //            {
-        //                tileConfig.biomes[nCellValue] += 1;
-        //                tileConfig.biomes[tileConfig.defaultBiome] -= 1; 
-        //            }
-        //        }
-        //        //Stack the biomes that count towards the same weight (For example, Forest and Deep Forest both contribute to making something a deep forest)
-        //        tileConfig.biomes[5] += tileConfig.biomes[7]; //Forest gets Deep Forest counts
-
-
-        //        //Now check if any biome has more than 4 counts, and if it is, convert to the border tile type.
-        //        for (int b = 0; b < tileConfig.biomes.Length; b++)
-        //        {
-        //            if (tileConfig.biomes[b] >= 4)
-        //            {
-        //                //Convert to border tile
-        //                switch (cellValue)
-        //                {
-        //                    case 0: //Water
-        //                        switch (b)
-        //                        {
-        //                            case 1: //Grass
-        //                                grid.SetCell(i, j, 4); //Shallows
-        //                                break;
-        //                        }
-        //                        break;
-        //                    case 1: //Grass
-        //                        switch (b)
-        //                        {
-        //                            case 0: //Water
-        //                                grid.SetCell(i, j, 3); //Beach
-        //                                break;
-        //                        }
-        //                        break;
-        //                }
-        //            }
-        //        }
-        //    }
-        //}
 
         return grid;
     }
@@ -224,7 +174,7 @@ public class WorldManager : MonoBehaviour
     private HexGrid AddForest(HexGrid grid)
     {
         //We'll use another cloud gen for this, but with some random pressures and weights, and then we'll use the main grid as a mask to only add forests to grass tiles
-        HexGrid forestCloud = cloudGen.GenHexCloud(new HexGrid(grid.dimensions().x, grid.dimensions().y), false, 12, 20);
+        HexGrid forestCloud = cloudGen.GenHexCloud(new HexGrid(grid.dimensions().x, grid.dimensions().y), tilePacker, false, 12, 20);
         Vector3Int cellCoord = new Vector3Int();
         for (int cellIndex = 0; cellIndex < grid.size(); cellIndex++)
         {
@@ -237,6 +187,8 @@ public class WorldManager : MonoBehaviour
                 {
                     //Convert to forest tile
                     grid.SetCell(cellCoord, (int)BiomeType.Forest); //Assuming 5 is the forest tile index
+                    tilePacker.SetAllBiomes((int)BiomeType.Forest);
+                    grid.SetCellBin(cellCoord, tilePacker.packedTile);
                 }
             }
         }
@@ -256,6 +208,8 @@ public class WorldManager : MonoBehaviour
                     {
                         //Convert to light forest
                         grid.SetCell(cellCoord, (int)BiomeType.LightForest); //Assuming 6 is the light forest tile index
+                        tilePacker.SetAllBiomes((int)BiomeType.LightForest);
+                        grid.SetCellBin(cellCoord, tilePacker.packedTile);
                         break;
                     }
                 }
@@ -309,12 +263,121 @@ public class WorldManager : MonoBehaviour
                         {
                             //Convert to deep forest
                             grid.SetCell(cellCoord, (int)BiomeType.DeepForest);
+                            tilePacker.SetAllBiomes((int)BiomeType.DeepForest);
+                            grid.SetCellBin(cellCoord, tilePacker.packedTile);
                         }
                     }
                 }
             }
         }
 
+        return grid;
+    }
+
+    private HexGrid ApplyEdges(HexGrid grid)
+    {
+        int[] cell = new int[7]; //Base biome + 6 edges
+        Vector3Int[] neighbours = new Vector3Int[6];
+        //The replacement for what we do in the fetch function, but done at world gen time instead of every frame
+        for (int i = 0; i < grid.size(); i++)
+        {
+            Vector3Int cellCoord = grid.IndexToCube(i);
+            ulong packedTile = grid.GetCellBin(cellCoord);
+            tilePacker.SetPackedTile(packedTile);
+            cell = tilePacker.biomes;
+
+            //Now we do the edge replacements
+            BiomeType biomeType = (BiomeType)cell[0];
+            if (biomeType != BiomeType.Desert) //Skip the desert for now
+            {
+                world.GetNeighbourCoords(cellCoord, ref neighbours);
+                for (int n = 0; n < neighbours.Length; n++)
+                {
+                    Vector3Int nCoord = neighbours[n];
+                    ulong nPackedTile = world.GetCellBin(nCoord);
+                    tilePacker.SetPackedTile(nPackedTile);
+                    int nCellValue = tilePacker.biomes[0];
+                    if (nCellValue == -1)
+                        continue;
+                    BiomeType nBiomeType = (BiomeType)nCellValue;
+                    if (nBiomeType != biomeType)
+                    {
+                        //These are the edge cases, and where we add more edges as the world gets more biomes
+                        switch (biomeType)
+                        {
+                            case BiomeType.Water:
+                                switch (nBiomeType)
+                                {
+                                    case BiomeType.Grass:
+                                        cell[n + 1] = (int)BiomeType.Shallows;
+                                        break;
+                                    case BiomeType.LightForest:
+                                        cell[n + 1] = (int)BiomeType.Shallows;
+                                        break;
+                                    case BiomeType.Beach:
+                                        cell[n + 1] = (int)BiomeType.Shallows;
+                                        break;
+                                }
+                                break;
+                            case BiomeType.Grass:
+                                switch (nBiomeType)
+                                {
+                                    case BiomeType.Water:
+                                        cell[n + 1] = (int)BiomeType.Beach;
+                                        break;
+                                    case BiomeType.Beach:
+                                        cell[n + 1] = (int)BiomeType.Beach;
+                                        break;
+                                }
+                                break;
+                            case BiomeType.Beach:
+                                switch (nBiomeType)
+                                {
+                                    case BiomeType.Water:
+                                        cell[n + 1] = (int)BiomeType.Shallows;
+                                        break;
+                                    case BiomeType.Shallows:
+                                        cell[n + 1] = (int)BiomeType.Shallows;
+                                        break;
+                                }
+                                break;
+                            case BiomeType.Shallows:
+                                switch (nBiomeType)
+                                {
+                                    case BiomeType.Grass:
+                                        cell[n + 1] = (int)BiomeType.Beach;
+                                        break;
+                                }
+                                break;
+                            case BiomeType.Forest:
+                                switch (nBiomeType)
+                                {
+                                    case BiomeType.Grass:
+                                        cell[n + 1] = (int)BiomeType.LightForest;
+                                        break;
+                                }
+                                break;
+                            case BiomeType.LightForest:
+                                switch (nBiomeType)
+                                {
+                                    case BiomeType.Water:
+                                        cell[n + 1] = (int)BiomeType.Beach;
+                                        break;
+                                    case BiomeType.Grass:
+                                        cell[n + 1] = (int)BiomeType.Grass;
+                                        break;
+                                    case BiomeType.Shallows:
+                                        cell[n + 1] = (int)BiomeType.Beach;
+                                        break;
+                                }
+                                break;
+                        }
+                    }
+                }
+            }
+            tilePacker.SetBiomes(cell);
+            grid.SetCellBin(cellCoord, tilePacker.packedTile);
+        }
         return grid;
     }
 
@@ -329,11 +392,8 @@ public class WorldManager : MonoBehaviour
         
         return grid;
     }
-
-
     public Material[] fetch(Vector2Int bottomLeft, Vector2Int size)
     {
-        //Material[][] TileMaterials = new Material[size.x * size.y][]; //Array of arrays. Each sub array is the materials for a tile, Main, EdgeA, EdgeB, etc.
         if (viewBuffer == null || viewBuffer.Length != size.x * size.y * 7)
         {
             viewBuffer = new Material[size.x * size.y * 7];
@@ -454,6 +514,38 @@ public class WorldManager : MonoBehaviour
                         }
                     }
                 }
+            }
+        }
+        return viewBuffer;
+    }
+
+    public Material[] fetch(Vector3Int[] coords) //Fetch by list of coordinates, lighter for scrolling.
+    {
+        if (viewBuffer == null || viewBuffer.Length != coords.Length * 7)
+        {
+            viewBuffer = new Material[coords.Length * 7];
+        }
+
+        ulong packedTile = 0;
+        int baseMatIndex = 0;
+        for (int i = 0; i < coords.Length; i++)
+        {
+            baseMatIndex = i * 7;
+            packedTile = world.GetCellBin(coords[i]);
+            if (packedTile == ulong.MaxValue)
+            {
+                //Invalid cell
+                for (int j = 0; j < 7; j++)
+                {
+                    viewBuffer[baseMatIndex + j] = null;
+                }
+                continue;
+            }
+            tilePacker.SetPackedTile(packedTile);
+
+            for (int j = 0; j < 7; j++)
+            {
+                viewBuffer[baseMatIndex + j] = matList[tilePacker.biomes[j]];
             }
         }
         return viewBuffer;
