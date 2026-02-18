@@ -3,9 +3,11 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Xml;
 using UnityEditor.ShaderGraph.Internal;
 using UnityEditor.TerrainTools;
 using UnityEngine;
+using UnityEngine.UIElements;
 
 
 public enum BiomeType
@@ -24,7 +26,7 @@ public enum BiomeType
 }
 public struct TileConfig
 {
-    public int[] biomes; //Basically a way to easily look at the biomes present in a tile so I can decide to shift the core
+    public int[] biomes; //Basically a way to easily look at the biomes present in a tile so I can debug
     public int defaultBiome;
 }
 
@@ -54,6 +56,42 @@ public class WorldManager : MonoBehaviour
     private Material[] viewBuffer = null;
     public int mountainDivisor = 10; //Higher number means less mountains
     public Vector2Int MinMaxMountainStrength = new Vector2Int(3, 8); //a mountain spawner pushes other mountains up by a random amount in this range
+    public int lakeDensity = 5; //Higher number means more lakes
+
+    //Direction Stuff
+    /*
+     * Edge     Corner      Corner Offset       PrimeAxis
+     * A        AB          (-0.5, -0.5, 0.5)   3
+     * B        BC          (-0.5, 0.5, 0.5)    -1
+     * C        CD          (-0.5, 0.5, -0.5)   2
+     * D        DE          (0.5, 0.5, -0.5)    -3
+     * E        EF          (0.5, -0.5, -0.5)   1
+     * F        FA          (0.5, -0.5, 0.5)    -2
+     * 
+     * To convert from PrimeAxis to a direction vector;
+     * vector = [0, 0, 0]
+     * vector[abs(PrimeAxis) - 1] = Math.sign(PrimeAxis)
+     */
+
+    private Vector3[] CornerOffsets = new Vector3[6] {
+        new Vector3(-0.5f, -0.5f, 0.5f),
+        new Vector3(-0.5f, 0.5f, 0.5f),
+        new Vector3(-0.5f, 0.5f, -0.5f),
+        new Vector3(0.5f, 0.5f, -0.5f),
+        new Vector3(0.5f, -0.5f, -0.5f),
+        new Vector3(0.5f, -0.5f, 0.5f)
+    };
+
+    private int[] PrimeAxis = new int[6] {
+        3,
+        -1,
+        2,
+        -3,
+        1,
+        -2
+    };
+
+
 
     public bool debugMode = false;
     public TilePacker tilePacker;
@@ -67,14 +105,14 @@ public class WorldManager : MonoBehaviour
     {
         world = new HexGrid(worldSize.x, worldSize.y);
         cloudGen = transform.GetComponent<HexCloudGen>();
-        tilePacker = new TilePacker(new int[7], matList.Count());
+        tilePacker = new TilePacker(new int[7], matList.Count(), new (bool, bool)[7]);
         GenerateWorld();
     }
 
     // Update is called once per frame
     void Update()
     {
-        
+
     }
 
     private void GenerateWorld()
@@ -93,8 +131,12 @@ public class WorldManager : MonoBehaviour
 
         world = AddMountains(world);
 
+        world = AddRiversLakes(world);
+
         //Apply the edge cases
         world = ApplyEdges(world);
+
+        //TODO: Replace the corner blending with a function that can take in specific biomes it's allowed to blend.
 
         // world = CleanEdges(world); //Final pass to apply edge blending between biomes
     }
@@ -149,7 +191,7 @@ public class WorldManager : MonoBehaviour
                                 case (int)BiomeType.Grass: //Grass
                                     grid.SetCell(cubeCoord, (int)BiomeType.Shallows); //Shallows
                                     tilePacker.SetAllBiomes((int)BiomeType.Shallows);
-                                    grid.SetCellBin(cubeCoord, tilePacker.packedTile);
+                                    grid.SetCellBin(cubeCoord, tilePacker.packedTile, 0);
                                     break;
                             }
                             break;
@@ -159,7 +201,7 @@ public class WorldManager : MonoBehaviour
                                 case (int)BiomeType.Water: //Water
                                     grid.SetCell(cubeCoord, (int)BiomeType.Beach); //Beach
                                     tilePacker.SetAllBiomes((int)BiomeType.Beach);
-                                    grid.SetCellBin(cubeCoord, tilePacker.packedTile);
+                                    grid.SetCellBin(cubeCoord, tilePacker.packedTile, 0);
                                     break;
                             }
                             break;
@@ -167,6 +209,7 @@ public class WorldManager : MonoBehaviour
                 }
             }
         }
+
 
         return grid;
     }
@@ -188,7 +231,7 @@ public class WorldManager : MonoBehaviour
                     //Convert to forest tile
                     grid.SetCell(cellCoord, (int)BiomeType.Forest); //Assuming 5 is the forest tile index
                     tilePacker.SetAllBiomes((int)BiomeType.Forest);
-                    grid.SetCellBin(cellCoord, tilePacker.packedTile);
+                    grid.SetCellBin(cellCoord, tilePacker.packedTile, tilePacker.cornerBlends);
                 }
             }
         }
@@ -209,7 +252,7 @@ public class WorldManager : MonoBehaviour
                         //Convert to light forest
                         grid.SetCell(cellCoord, (int)BiomeType.LightForest); //Assuming 6 is the light forest tile index
                         tilePacker.SetAllBiomes((int)BiomeType.LightForest);
-                        grid.SetCellBin(cellCoord, tilePacker.packedTile);
+                        grid.SetCellBin(cellCoord, tilePacker.packedTile, tilePacker.cornerBlends);
                         break;
                     }
                 }
@@ -264,7 +307,7 @@ public class WorldManager : MonoBehaviour
                             //Convert to deep forest
                             grid.SetCell(cellCoord, (int)BiomeType.DeepForest);
                             tilePacker.SetAllBiomes((int)BiomeType.DeepForest);
-                            grid.SetCellBin(cellCoord, tilePacker.packedTile);
+                            grid.SetCellBin(cellCoord, tilePacker.packedTile, tilePacker.cornerBlends);
                         }
                     }
                 }
@@ -282,8 +325,11 @@ public class WorldManager : MonoBehaviour
         for (int i = 0; i < grid.size(); i++)
         {
             Vector3Int cellCoord = grid.IndexToCube(i);
-            ulong packedTile = grid.GetCellBin(cellCoord);
-            tilePacker.SetPackedTile(packedTile);
+            //ulong packedTile = grid.(cellCoord);
+            HexData tile = grid.GetCellData(cellCoord);
+            //ulong packedTile = tile.ID;
+            //ushort cornerFlags = tile.cornerFlags;
+            tilePacker.SetPackedTile(tile);
             cell = tilePacker.biomes;
 
             //Now we do the edge replacements
@@ -294,8 +340,10 @@ public class WorldManager : MonoBehaviour
                 for (int n = 0; n < neighbours.Length; n++)
                 {
                     Vector3Int nCoord = neighbours[n];
-                    ulong nPackedTile = world.GetCellBin(nCoord);
-                    tilePacker.SetPackedTile(nPackedTile);
+                    //ulong nPackedTile = world.GetCellBin(nCoord);
+                    HexData nTile = world.GetCellData(nCoord);
+                    //tilePacker.SetPackedTile(nPackedTile);
+                    tilePacker.SetPackedTile(nTile);
                     int nCellValue = tilePacker.biomes[0];
                     if (nCellValue == -1)
                         continue;
@@ -355,6 +403,9 @@ public class WorldManager : MonoBehaviour
                                     case BiomeType.Grass:
                                         cell[n + 1] = (int)BiomeType.LightForest;
                                         break;
+                                    case BiomeType.Water:
+                                        cell[n + 1] = (int)BiomeType.LightForest;
+                                        break;
                                 }
                                 break;
                             case BiomeType.LightForest:
@@ -371,13 +422,131 @@ public class WorldManager : MonoBehaviour
                                         break;
                                 }
                                 break;
+                            case BiomeType.DeepForest:
+                                switch (nBiomeType)
+                                {
+                                    case BiomeType.Water:
+                                        cell[n + 1] = (int)BiomeType.Forest;
+                                        break;
+                                }
+                                break;
                         }
                     }
                 }
             }
             tilePacker.SetBiomes(cell);
-            grid.SetCellBin(cellCoord, tilePacker.packedTile);
+            //grid.SetCellBin(cellCoord, tilePacker.packedTile);
+            grid.SetCellBin(cellCoord, tilePacker.packedTile, tilePacker.cornerBlends);
         }
+
+        //Super inefficient. We'll have to do it in batches, but that's for my optimization time.
+        for (int cellIndex = 0; cellIndex < grid.size(); cellIndex++)
+        {
+            Vector3Int coords = grid.IndexToCube(cellIndex);
+            Vector3Int[] neighborCoords = new Vector3Int[6];
+
+            int cellVal = grid.GetCell(coords);
+            if (cellVal == -1)
+                continue;
+
+            grid.GetNeighbourCoords(coords, ref neighborCoords);
+
+            int neighbor1Index = 5; //The top left neighbor, we'll need to handle wrapping
+            int neighbor2Index = 1; //The right neighbor
+            int neighbor1CheckIndex = 1; //The edge index to check on neighbor 1
+            int neighbor2CheckIndex = 5; //The edge index to check on neighbor 2
+
+            tilePacker.SetPackedTile(grid.GetCellData(coords));
+            int[] mainBiomes = (int[])tilePacker.biomes.Clone();
+            (bool blend, bool sameIndex)[] mainCornerBlends = new (bool, bool)[6];
+            for (int c = 0; c < 6; c++)
+                mainCornerBlends[c] = (false, false);
+
+            for (int edgeIndex = 0; edgeIndex < 6; edgeIndex++)
+            {
+                Vector3Int neighborCoord = neighborCoords[neighbor1Index]; //The coord of the neighbour in the world
+                HexData hexData = grid.GetCellData(neighborCoord);
+                int[] neighbor1Biomes = new int[7];
+                ulong neighborTileID = hexData.ID;
+                if (neighborTileID != ulong.MaxValue)
+                {
+                    tilePacker.SetPackedTile(hexData);
+                    neighbor1Biomes = (int[])tilePacker.biomes.Clone();
+                }
+                else
+                    neighbor1Biomes = null;
+
+                neighborCoord = neighborCoords[neighbor2Index];
+                hexData = grid.GetCellData(neighborCoord);
+                int[] neighbor2Biomes = new int[7];
+                neighborTileID = hexData.ID;
+                if (neighborTileID != ulong.MaxValue)
+                {
+                    tilePacker.SetPackedTile(hexData);
+                    neighbor2Biomes = (int[])tilePacker.biomes.Clone();
+                }
+                else
+                    neighbor2Biomes = null;
+
+                //Set the corner to a debug material if it's the first corner, just to make sure we're at least setting it correctly. We can remove this later, but for now it's a good way to test if we're doing the right thing.
+                //if (edgeIndex == 0)
+                //    mainCornerBlends[edgeIndex] = (true, false);
+                bool areConnectedEdgesTheSame = true; //If the two edges are the same, and we're meant to blend, don't bother.
+                int edgeCheck = (edgeIndex + 3) % 6;
+                int neighborCheckIndex = edgeIndex;
+                neighborCoord = neighborCoords[neighborCheckIndex];
+                int[] neighborBiomes = new int[7];
+                //hexData = grid.GetCellData(neighborCoord);
+                if (hexData.ID != ulong.MaxValue)
+                {
+                    tilePacker.SetPackedTile(hexData);
+                    neighborBiomes = (int[])tilePacker.biomes.Clone();
+                }
+                else
+                    neighborBiomes = null;
+
+                //if (hexData.ID != ulong.MaxValue && hexData.ID != 0 && hexData.ID != 17895697 && hexData.ID != 53687091 && hexData.ID != 71582788)
+                //{
+                //    int bp = 1;
+                //}
+
+
+                if (neighborBiomes != null)
+                    areConnectedEdgesTheSame = (mainBiomes[edgeIndex + 1] == neighborBiomes[edgeCheck + 1]); //Have to add one because of the core
+                areConnectedEdgesTheSame = false;
+                //TODO: Test some corners with the debug material. Make sure we're doing the right thing here.
+                if (neighbor1Biomes != null)
+                {
+                    if ((mainBiomes[edgeIndex + 1] == neighbor1Biomes[neighbor1CheckIndex + 1]) && !areConnectedEdgesTheSame)// || mainBiomes[edgeIndex + 1] == neighbor1Biomes[((neighbor1CheckIndex + 1) % 6) + 1])) //Have to add one because of the core
+                    {
+                        mainCornerBlends[neighbor1Index] = (true, false); //blend the left corner. We need to blend a different index because it's technically assigned to a different index, but it blends with OUR index.
+                    }
+                }
+                if (neighbor2Biomes != null)
+                {
+                    if ((mainBiomes[edgeIndex + 1] == neighbor2Biomes[neighbor2CheckIndex + 1]) && !areConnectedEdgesTheSame)// || mainBiomes[edgeIndex + 1] == neighbor2Biomes[((neighbor2CheckIndex + 5) % 6) + 1])) //Have to add one because of the core
+                    {
+                        //if (mainCornerBlends[edgeIndex].blend != true) //Don't overwright
+                        //{
+                        mainCornerBlends[edgeIndex] = (true, true); //blend the right corner. (For my own peace of mind, (true, false) is translates to (true = yes blend, false = same index as edge)
+                        //}
+                    }
+                }
+
+                //Increment
+                neighbor1Index = (neighbor1Index + 1) % 6;
+                neighbor2Index = (neighbor2Index + 1) % 6;
+                neighbor1CheckIndex = (neighbor1CheckIndex + 1) % 6;
+                neighbor2CheckIndex = (neighbor2CheckIndex + 1) % 6;
+
+            }
+
+            //Update the tile with the new corner blends
+            tilePacker.SetBlends(mainCornerBlends);
+            tilePacker.SetBiomes(mainBiomes);
+            grid.SetCellBin(coords, tilePacker.packedTile, tilePacker.cornerBlends);
+        }
+
         return grid;
     }
 
@@ -392,132 +561,512 @@ public class WorldManager : MonoBehaviour
         
         return grid;
     }
-    public Material[] fetch(Vector2Int bottomLeft, Vector2Int size)
+
+    private HexGrid AddRiversLakes(HexGrid grid)
     {
-        if (viewBuffer == null || viewBuffer.Length != size.x * size.y * 7)
-        {
-            viewBuffer = new Material[size.x * size.y * 7];
-        }
-        int cellValue = -1;
+        //Start by picking random places to put lakes. These will be clusters of water tiles surrounded by land.
+        //We'll aim for x lakes per 1000 tiles, so lakeDensity controls how many lakes we try to spawn
+        int lakeSpawns = Mathf.FloorToInt(world.size() / 1000) * lakeDensity;
+        List<int> viableLakeSpotsBuffer = new List<int>();
+        HexGrid riverLakesLayer = new HexGrid(grid.dimensions().x, grid.dimensions().y);
+        Vector3Int[] neighbors = new Vector3Int[6];
+
+        //We'll convert the grid to a more usable format for this. If we add more ground types that can be a lake, we need to update here.
         Vector3Int cellCoord = new Vector3Int();
-        Vector3Int[] neighbours = new Vector3Int[6];
-        int baseMatIndex = 0;
-        for (int y = bottomLeft.y; y < bottomLeft.y + size.y; y++)
+        for (int cellIndex = 0; cellIndex < grid.size(); cellIndex++)
         {
-            for (int x = bottomLeft.x; x < bottomLeft.x + size.x; x++)
+            cellCoord = grid.IndexToCube(cellIndex);
+            BiomeType cellValue = (BiomeType)grid.GetCell(cellCoord);
+            if (cellValue == BiomeType.Grass || cellValue == BiomeType.Forest || cellValue == BiomeType.LightForest || cellValue == BiomeType.DeepForest)
             {
-                cellCoord = world.OddRToCube(x, y);
-                cellValue = world.GetCell(cellCoord);
-                //int cellValue = world.GetCell(x, y);
-                baseMatIndex = ((y - bottomLeft.y) * size.x + (x - bottomLeft.x)) * 7;
-                //For each tile, the base material is first, then the 6 edge materials clockwise starting from NE
-                //Material[] mats = new Material[7];
-                if (cellValue == -1)
+                //NeighborCheck, lakes shouldn't spawn on coasts
+                grid.GetNeighbourCoords(cellCoord, ref neighbors);
+                bool adjacentToWater = false;
+                for (int n = 0; n < neighbors.Length; n++)
                 {
-                    //Invalid cell
-                    for (int i = 0; i < 7; i++)
+                    Vector3Int nCoord = neighbors[n];
+                    BiomeType nCellValue = (BiomeType)grid.GetCell(nCoord);
+                    if (nCellValue == BiomeType.Water || nCellValue == BiomeType.Beach || nCellValue == BiomeType.Shallows)
                     {
-                        viewBuffer[baseMatIndex + i] = null;
+                        adjacentToWater = true;
+                        break;
                     }
-                    continue;
                 }
-                for (int i = 0; i < 7; i++)
+                if (!adjacentToWater)
                 {
-                    viewBuffer[baseMatIndex + i] = matList[cellValue]; //Default the whole tile to the base material
+                    riverLakesLayer.SetCell(cellCoord, 1); //Land
+                    viableLakeSpotsBuffer.Add(cellIndex);
+                }
+                else
+                {
+                    riverLakesLayer.SetCell(cellCoord, 0); //Water or other
                 }
 
-                //TODO: Do this in world gen instead, so We don't have to do these lookups every time the tile materials are fetched
-                //Lookup border tiles. Then we can set the edge materials accordingly
-                BiomeType biomeType = (BiomeType)cellValue;
-                if (biomeType != BiomeType.Desert) //Skip the desert for now
+            }
+            else
+            {
+                riverLakesLayer.SetCell(cellCoord, 0); //Water or other
+            }
+        }
+        //Vector3Int[] neighbors = new Vector3Int[6];
+        //Now we spawn the lakes, we'll set them to 2 in the riverLakesLayer
+        for (int i = 0; i < lakeSpawns; i++)
+        {
+            if (viableLakeSpotsBuffer.Count == 0)
+                break; //No more viable spots
+            int randomIndex = UnityEngine.Random.Range(0, viableLakeSpotsBuffer.Count);
+            int lakeCellIndex = viableLakeSpotsBuffer[randomIndex];
+            cellCoord = grid.IndexToCube(lakeCellIndex);
+            riverLakesLayer.SetCell(cellCoord, 2); //Lake
+            viableLakeSpotsBuffer.RemoveAt(randomIndex);
+
+            //We generate a list of spots we can expand to, and this list will control if/when the lake has grown to the extents.
+            List<Vector3Int> expansionSpots = new List<Vector3Int>();
+            riverLakesLayer.GetNeighbourCoords(cellCoord, ref neighbors);
+            for (int n = 0; n < neighbors.Length; n++)
+            {
+                Vector3Int nCoord = neighbors[n];
+                int nCellValue = riverLakesLayer.GetCell(nCoord);
+                if (nCellValue == 1) //Land, can expand into
                 {
-                    world.GetNeighbourCoords(cellCoord, ref neighbours);
-                    for (int n = 0; n < neighbours.Length; n++)
+                    expansionSpots.Add(nCoord);
+                }
+            }
+
+            //Lets expand it a bit by looking up the neighbors and seeing if they're allowed, to a max of lakeSpawns, because it seems like a decent limit
+            for (int n = 0; n < lakeSpawns; n++)
+            {
+                if (expansionSpots.Count == 0)
+                    break;
+                if (UnityEngine.Random.Range(0f, 1f) < 0.1f) //10% chance to stop expanding each iteration
+                    break;
+
+
+                riverLakesLayer.GetNeighbourCoords(cellCoord, ref neighbors);
+                int randomExpansionIndex = UnityEngine.Random.Range(0, expansionSpots.Count);
+                Vector3Int expandCoord = expansionSpots[randomExpansionIndex];
+                riverLakesLayer.SetCell(expandCoord, 2); //Lake
+                while (expansionSpots.Contains(expandCoord))
+                    expansionSpots.Remove(expandCoord);// A bit gross, but it's during load. If we need to we can optimize later
+                viableLakeSpotsBuffer.Remove(grid.OddRToIndex(expandCoord));
+
+                //Add new expansion spots
+                riverLakesLayer.GetNeighbourCoords(expandCoord, ref neighbors);
+                for (int nn = 0; nn < neighbors.Length; nn++)
+                {
+                    Vector3Int nnCoord = neighbors[nn];
+                    int nnCellValue = riverLakesLayer.GetCell(nnCoord);
+                    if (nnCellValue == 1) //Land, can expand into
                     {
-                        Vector3Int nCoord = neighbours[n];
-                        int nCellValue = world.GetCell(nCoord);
-                        if (nCellValue == -1)
-                            continue;
-                        BiomeType nBiomeType = (BiomeType)nCellValue;
-                        if (nBiomeType != biomeType)
-                        {
-                            //These are the edge cases, and where we add more edges as the world gets more biomes
-                            switch (biomeType)
-                            {
-                                case BiomeType.Water:
-                                    switch (nBiomeType)
-                                    {
-                                        case BiomeType.Grass:
-                                            viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
-                                            break;
-                                        case BiomeType.LightForest:
-                                            viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
-                                            break;
-                                        case BiomeType.Beach:
-                                            viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
-                                            break;
-                                    }
-                                    break;
-                                case BiomeType.Grass:
-                                    switch (nBiomeType)
-                                    {
-                                        case BiomeType.Water:
-                                            viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
-                                            break;
-                                        case BiomeType.Beach:
-                                            viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
-                                            break;
-                                    }
-                                    break;
-                                case BiomeType.Beach:
-                                    switch (nBiomeType)
-                                    {
-                                        case BiomeType.Water:
-                                            viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
-                                            break;
-                                        case BiomeType.Shallows:
-                                            viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
-                                            break;
-                                    }
-                                    break;
-                                case BiomeType.Shallows:
-                                    switch (nBiomeType)
-                                    {
-                                        case BiomeType.Grass:
-                                            viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
-                                            break;
-                                    }
-                                    break;
-                                case BiomeType.Forest:
-                                    switch (nBiomeType)
-                                    {
-                                        case BiomeType.Grass:
-                                            viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.LightForest];
-                                            break;
-                                    }
-                                    break;
-                                case BiomeType.LightForest:
-                                    switch (nBiomeType)
-                                    {
-                                        case BiomeType.Water:
-                                            viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
-                                            break;
-                                        case BiomeType.Grass:
-                                            viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Grass];
-                                            break;
-                                        case BiomeType.Shallows:
-                                            viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
-                                            break;
-                                    }
-                                    break;
-                            }
-                        }
+                        //Gives a natural boost to tiles that have been added to the list multiple times, less likely to form strange shapes while still giving islands a chance to form
+                        expansionSpots.Add(nnCoord);
+                    }
+                }
+            }
+
+
+            //Remove the expansion points from the potential lake spots, because they'd spawn overlapping other lakes.
+            for (int n = 0; n < expansionSpots.Count; n++)
+            {
+                Vector3Int lCoord = expansionSpots[n];
+                int lCellIndex = grid.OddRToIndex(lCoord);
+                if (viableLakeSpotsBuffer.Contains(lCellIndex))
+                {
+                    viableLakeSpotsBuffer.Remove(lCellIndex);
+                }
+            }
+        }
+
+
+        //Now for Rivers. We'll start my making a list of river spawn locations. These are lakes that are adjacent to land tiles.
+        List<Vector3Int> RiverSpawnLocations = new List<Vector3Int>();
+        for (int lakeIndex = 0; lakeIndex < riverLakesLayer.size(); lakeIndex++)
+        {
+            cellCoord = riverLakesLayer.IndexToCube(lakeIndex);
+            int cellValue = riverLakesLayer.GetCell(cellCoord);
+            if (cellValue == 2) //Lake
+            {
+                //Check neighbors for land
+                riverLakesLayer.GetNeighbourCoords(cellCoord, ref neighbors);
+                for (int n = 0; n < neighbors.Length; n++)
+                {
+                    Vector3Int nCoord = neighbors[n];
+                    int nCellValue = riverLakesLayer.GetCell(nCoord);
+                    if (nCellValue == 1) //Land
+                    {
+                        RiverSpawnLocations.Add(cellCoord);
+                        break;
                     }
                 }
             }
         }
-        return viewBuffer;
+
+
+        //Now we'll start spawning rivers.
+        Vector3Int riverCarver = new Vector3Int(); //Basically the spot that the river is currently at. It'll travel along the edges of biomes until it stops.
+        int cornerIndex = 0;
+
+        for (int i = 0; i < lakeSpawns; i++)//We'll, again, try to spawn as many rivers as lakes
+        {
+            if (RiverSpawnLocations.Count == 0)
+                break; //No more viable river spawns
+            int randomIndex = UnityEngine.Random.Range(0, RiverSpawnLocations.Count);
+            Vector3Int lakeCoord = RiverSpawnLocations[randomIndex];
+            RiverSpawnLocations.RemoveAt(randomIndex);
+            //Pick a random edge to start the river from
+            riverLakesLayer.GetNeighbourCoords(lakeCoord, ref neighbors);
+            List<int> viableCorners = new List<int>();
+            for (int n = 0; n < neighbors.Length; n++)
+            {
+                Vector3Int nCoord = neighbors[n];
+                Vector3Int n2Coord = neighbors[(n + 1) % neighbors.Length];
+                int nCellValue = riverLakesLayer.GetCell(nCoord);
+                int n2CellValue = riverLakesLayer.GetCell(n2Coord);
+                if (nCellValue == 1 && n2CellValue == 1) //Land
+                {
+                    viableCorners.Add(n);
+                }
+            }
+            if (viableCorners.Count == 0)
+            {
+                RiverSpawnLocations.Remove(lakeCoord);
+                continue; //No viable corners
+            }
+
+            int randomCornerIndex = UnityEngine.Random.Range(0, viableCorners.Count); //The corners are the furthest point clockwise of the edge.
+            cornerIndex = viableCorners[randomCornerIndex];
+            List<Vector3Int> riverPath = new List<Vector3Int>(); //Keep track of the river.
+            List<int> riverPathCorners = new List<int>(); //Keep track of the corners used.
+
+            Vector3 direction = new Vector3();
+            //Get the prime axis
+            direction[Math.Abs(PrimeAxis[cornerIndex]) - 1] = Mathf.Sign(PrimeAxis[cornerIndex]);
+            //Set one of the other two axis to a value between 0 and -direction[Math.Abs(PrimeAxis[cornerIndex] - 1)]
+            int otherAxis = UnityEngine.Random.Range(0, 3);
+            if (otherAxis == Math.Abs(PrimeAxis[cornerIndex] - 1))
+                otherAxis = (otherAxis + 1) % 3; //Not ideal, but probably fine for now
+            direction[otherAxis] = UnityEngine.Random.Range(0f, -(direction[Math.Abs(PrimeAxis[cornerIndex]) - 1]));
+
+
+
+            riverCarver = lakeCoord;
+            riverPath.Clear();
+            riverPathCorners.Clear();
+            riverPath.Add(riverCarver);
+            riverPathCorners.Add(cornerIndex);
+
+            bool riverActive = true;
+
+            while (riverActive)
+            {
+                //We should Only be in here if the two tiles are valid for carving a river through.
+                //Get the neighbors of the river carver, which will be cornerIndex and cornerIndex + 1
+                grid.GetNeighbourCoords(riverCarver, ref neighbors);
+                Vector3Int nACoord = neighbors[cornerIndex];
+                Vector3Int nBCoord = neighbors[(cornerIndex + 1) % neighbors.Length];
+                riverActive = false;
+
+                Vector3 HomeCornerPos = riverCarver + CornerOffsets[cornerIndex];
+                Vector3[] nACorners = new Vector3[6];
+                Vector3[] nBCorners = new Vector3[6];
+
+                for (int c = 0; c < 6; c++)
+                {
+                    nACorners[c] = nACoord + CornerOffsets[c];
+                    nBCorners[c] = nBCoord + CornerOffsets[c];
+                }
+
+                Vector3[] nACornerDirs = new Vector3[6];
+                Vector3[] nBCornerDirs = new Vector3[6];
+
+                for (int c = 0; c < 6; c++)
+                {
+                    nACornerDirs[c] = (nACorners[c] - HomeCornerPos);
+                    nBCornerDirs[c] = (nBCorners[c] - HomeCornerPos);
+                }
+
+                float[] Similarities = new float[12]; // All 12 corners, 6 from each neighbor, so we can do a random choice between the percentage matches
+
+                for (int c = 0; c < 6; c++)
+                {
+                    Similarities[c] = Vector3.Dot(direction.normalized, nACornerDirs[c].normalized) - 0.05f; //A small reduction to add randomization 
+                    if (Similarities[c] < 0)
+                        Similarities[c] = 0;
+                    Similarities[c + 6] = Vector3.Dot(direction.normalized, nBCornerDirs[c].normalized) - 0.05f;
+                    if (Similarities[c + 6] < 0)
+                        Similarities[c + 6] = 0;
+                }
+
+                float totalSimilarity = 0f;
+                for (int s = 0; s < Similarities.Length; s++)
+                {
+                    totalSimilarity += Similarities[s];
+                }
+
+                float roll = UnityEngine.Random.Range(0f, totalSimilarity);
+                float runningTotal = 0f;
+                Vector3Int homeTile = riverCarver;
+                //int homeCorner = cornerIndex;
+                int enteranceCorner = cornerIndex; //The corner that the river leaves the current tile from
+
+                //Kinda Gross, if we want to optimise, look here
+                for (int s = 0; s < Similarities.Length; s++)
+                {
+                    runningTotal += Similarities[s];
+                    if (roll <= runningTotal)
+                    {
+                        //We have a winner
+                        if (s < 6)
+                        {
+                            //Neighbor A
+                            riverCarver = nACoord;
+                            enteranceCorner = (cornerIndex + 2) % 6; //The river leaves the current tile 2 corners clockwise from where it entered
+                            if (enteranceCorner < 0)
+                                enteranceCorner += 6;
+                            cornerIndex = s;
+                        }
+                        else
+                        {
+                            //Neighbor B
+                            riverCarver = nBCoord;
+                            enteranceCorner = (cornerIndex + 4) % 6; //The river leaves the current tile 2 corners counter-clockwise from where it entered
+                            if (enteranceCorner < 0)
+                                enteranceCorner += 6;
+                            cornerIndex = s - 6;
+                        }
+                        if (!grid.IsValidCoordinate(riverCarver))
+                        {
+                            riverActive = false;
+                            break;
+                        }
+
+                        //Connect the homeCorner to the offRampCorner by setting all the edges between them to water
+                        int clockwiseDistance = (cornerIndex - enteranceCorner + 6) % 6;
+                        int counterclockwiseDistance = (enteranceCorner - cornerIndex + 6) % 6;
+
+                        //Determine the faster direction
+                        bool clockwise = true;
+                        if (counterclockwiseDistance < clockwiseDistance)
+                        {
+                            clockwise = false;
+                        }
+                        else if (counterclockwiseDistance == clockwiseDistance)
+                        {
+                            if (UnityEngine.Random.value < 0.5f)
+                                clockwise = false;
+                        }
+
+                        //Temporarily force all rivers to be clockwise for testing
+                        //clockwise = true;
+                        //grid.GetNeighbourCoords(homeTile, ref neighbors);
+
+                        //Carve the river on the home tile
+                        if (clockwise)
+                        {
+                            int cIndex = enteranceCorner; //For testing, I'm swapping the home and offRamp corners
+                            tilePacker.SetPackedTile(grid.GetCellData(riverCarver));
+                            int[] biomes = (int[])tilePacker.biomes.Clone();
+                            while (cIndex != cornerIndex) 
+                            {
+                                biomes[((cIndex + 1) % 6) + 1] = (int)BiomeType.Water; //Set the edge to water
+                                cIndex = (cIndex + 1) % 6;
+                            }
+                            tilePacker.SetBiomes(biomes);
+                            grid.SetCellBin(riverCarver, tilePacker.packedTile, tilePacker.cornerBlends);
+                        }
+                        else
+                        {
+                            int cIndex = enteranceCorner;
+                            tilePacker.SetPackedTile(grid.GetCellData(riverCarver));
+                            int[] biomes = (int[])tilePacker.biomes.Clone();
+                            while (cIndex != cornerIndex)
+                            {
+                                biomes[((cIndex + 6) % 6) + 1] = (int)BiomeType.Water; //Set the edge to water
+                                cIndex = (cIndex + 5) % 6;
+                            }
+                            tilePacker.SetBiomes(biomes);
+                            grid.SetCellBin(riverCarver, tilePacker.packedTile, tilePacker.cornerBlends);
+                        }
+                        riverPath.Add(riverCarver);
+                        riverPathCorners.Add(cornerIndex);
+                        //Check if the new river carver position is valid
+                        riverLakesLayer.GetNeighbourCoords(riverCarver, ref neighbors);
+                        //If either of the two tiles the rivercarver sits between are water, we stop the river
+                        Vector3Int checkNACoord = neighbors[cornerIndex];
+                        Vector3Int checkNBCoord = neighbors[(cornerIndex + 1) % neighbors.Length];
+                        int nACellValue = riverLakesLayer.GetCell(checkNACoord);
+                        int nBCellValue = riverLakesLayer.GetCell(checkNBCoord);
+
+                        if (nACellValue == 0 || nBCellValue == 0) //Water or other
+                        {
+                            riverActive = false;
+                            break;
+                        }
+                        else if (UnityEngine.Random.value > 0.95)
+                        {
+                            riverActive = false; //5% chance to stop the river each step
+                            break;
+                        }
+                        else
+                        {
+                            riverActive = true;
+                        }
+                        break;
+                    }
+                }
+            }
+            for (int r = 0; r < riverPath.Count; r++)
+            {
+                Debug.Log("River Tile: " + riverPath[r] + " via corner " + riverPathCorners[r]);
+            }
+
+            //riverActive = false; //Test to see if it works so far
+        }
+
+
+        //For the time being, lets see what this looks like. Combine the layers, anything labled as 2 becomes a water tile in the main grid
+        for (int cellIndex = 0; cellIndex < grid.size(); cellIndex++)
+        {
+            cellCoord = grid.IndexToCube(cellIndex);
+            int lakeCellValue = riverLakesLayer.GetCell(cellCoord);
+            if (lakeCellValue == 2) //Lake
+            {
+                grid.SetCell(cellCoord, (int)BiomeType.Water);
+                tilePacker.SetAllBiomes((int)BiomeType.Water);
+                grid.SetCellBin(cellCoord, tilePacker.packedTile, tilePacker.cornerBlends);
+            }
+        }
+
+
+        return grid;
     }
+
+    //public Material[] fetch(Vector2Int bottomLeft, Vector2Int size)
+    //{
+    //    if (viewBuffer == null || viewBuffer.Length != size.x * size.y * 7)
+    //    {
+    //        viewBuffer = new Material[size.x * size.y * 7];
+    //    }
+    //    int cellValue = -1;
+    //    Vector3Int cellCoord = new Vector3Int();
+    //    Vector3Int[] neighbours = new Vector3Int[6];
+    //    int baseMatIndex = 0;
+    //    for (int y = bottomLeft.y; y < bottomLeft.y + size.y; y++)
+    //    {
+    //        for (int x = bottomLeft.x; x < bottomLeft.x + size.x; x++)
+    //        {
+    //            cellCoord = world.OddRToCube(x, y);
+    //            cellValue = world.GetCell(cellCoord);
+    //            //int cellValue = world.GetCell(x, y);
+    //            baseMatIndex = ((y - bottomLeft.y) * size.x + (x - bottomLeft.x)) * 7;
+    //            //For each tile, the base material is first, then the 6 edge materials clockwise starting from NE
+    //            //Material[] mats = new Material[7];
+    //            if (cellValue == -1)
+    //            {
+    //                //Invalid cell
+    //                for (int i = 0; i < 7; i++)
+    //                {
+    //                    viewBuffer[baseMatIndex + i] = null;
+    //                }
+    //                continue;
+    //            }
+    //            for (int i = 0; i < 7; i++)
+    //            {
+    //                viewBuffer[baseMatIndex + i] = matList[cellValue]; //Default the whole tile to the base material
+    //            }
+
+    //            //TODO: Do this in world gen instead, so We don't have to do these lookups every time the tile materials are fetched
+    //            //Lookup border tiles. Then we can set the edge materials accordingly
+    //            BiomeType biomeType = (BiomeType)cellValue;
+    //            if (biomeType != BiomeType.Desert) //Skip the desert for now
+    //            {
+    //                world.GetNeighbourCoords(cellCoord, ref neighbours);
+    //                for (int n = 0; n < neighbours.Length; n++)
+    //                {
+    //                    Vector3Int nCoord = neighbours[n];
+    //                    int nCellValue = world.GetCell(nCoord);
+    //                    if (nCellValue == -1)
+    //                        continue;
+    //                    BiomeType nBiomeType = (BiomeType)nCellValue;
+    //                    if (nBiomeType != biomeType)
+    //                    {
+    //                        //These are the edge cases, and where we add more edges as the world gets more biomes
+    //                        switch (biomeType)
+    //                        {
+    //                            case BiomeType.Water:
+    //                                switch (nBiomeType)
+    //                                {
+    //                                    case BiomeType.Grass:
+    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
+    //                                        break;
+    //                                    case BiomeType.LightForest:
+    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
+    //                                        break;
+    //                                    case BiomeType.Beach:
+    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
+    //                                        break;
+    //                                }
+    //                                break;
+    //                            case BiomeType.Grass:
+    //                                switch (nBiomeType)
+    //                                {
+    //                                    case BiomeType.Water:
+    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
+    //                                        break;
+    //                                    case BiomeType.Beach:
+    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
+    //                                        break;
+    //                                }
+    //                                break;
+    //                            case BiomeType.Beach:
+    //                                switch (nBiomeType)
+    //                                {
+    //                                    case BiomeType.Water:
+    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
+    //                                        break;
+    //                                    case BiomeType.Shallows:
+    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
+    //                                        break;
+    //                                }
+    //                                break;
+    //                            case BiomeType.Shallows:
+    //                                switch (nBiomeType)
+    //                                {
+    //                                    case BiomeType.Grass:
+    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
+    //                                        break;
+    //                                }
+    //                                break;
+    //                            case BiomeType.Forest:
+    //                                switch (nBiomeType)
+    //                                {
+    //                                    case BiomeType.Grass:
+    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.LightForest];
+    //                                        break;
+    //                                }
+    //                                break;
+    //                            case BiomeType.LightForest:
+    //                                switch (nBiomeType)
+    //                                {
+    //                                    case BiomeType.Water:
+    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
+    //                                        break;
+    //                                    case BiomeType.Grass:
+    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Grass];
+    //                                        break;
+    //                                    case BiomeType.Shallows:
+    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
+    //                                        break;
+    //                                }
+    //                                break;
+    //                        }
+    //                    }
+    //                }
+    //            }
+    //        }
+    //    }
+    //    return viewBuffer;
+    //}
 
     public Material[] fetch(Vector3Int[] coords) //Fetch by list of coordinates, lighter for scrolling.
     {
@@ -526,13 +1075,13 @@ public class WorldManager : MonoBehaviour
             viewBuffer = new Material[coords.Length * 7];
         }
 
-        ulong packedTile = 0;
+        HexData packedTile = new HexData();
         int baseMatIndex = 0;
         for (int i = 0; i < coords.Length; i++)
         {
             baseMatIndex = i * 7;
-            packedTile = world.GetCellBin(coords[i]);
-            if (packedTile == ulong.MaxValue)
+            packedTile = world.GetCellData(coords[i]);
+            if (packedTile.ID == ulong.MaxValue)
             {
                 //Invalid cell
                 for (int j = 0; j < 7; j++)

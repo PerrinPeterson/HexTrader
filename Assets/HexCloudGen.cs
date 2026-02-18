@@ -80,9 +80,9 @@ public class HexCloudGen : MonoBehaviour
             }
             //Set the final density into the grid
             int storedValue = Mathf.RoundToInt(Mathf.Clamp(finalDensity, 0, 1)); //TODO: Revert this back to Clamp01, just for testing
-            grid.SetCell(grid.IndexToCube(cellIndex), storedValue);
+            grid.SetCell(grid.IndexToCube(cellIndex), storedValue); //TODO: we don't need to store the original value any more.
             packer.SetBiomes(new int[7] { storedValue, storedValue, storedValue, storedValue, storedValue, storedValue, storedValue }); //Poorly optimised, but works for now
-            grid.SetCellBin(grid.IndexToCube(cellIndex), packer.packedTile);
+            grid.SetCellBin(grid.IndexToCube(cellIndex), packer.packedTile, packer.cornerBlends);
         }
 
         return grid;

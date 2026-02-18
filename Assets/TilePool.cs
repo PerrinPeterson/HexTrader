@@ -53,18 +53,28 @@ public static class TileWrapper
         return mats[4];
     }
 
-    //Set edge material, optionally set a specific corner material
+    //Set edge material, optionally set a specific corner material, or ignore corner materials.
     public static void SetEdge(Material mat, Material[] mats, int EdgeIndex, int CornerIndex = -1)
     {
         if (EdgeIndex < 0 || EdgeIndex >= 6)
             return;
-        if (CornerIndex > 1 || CornerIndex < -1)
+        if (CornerIndex > 2 || CornerIndex < -1)
             return;
 
         //If the corner index is -1, we can assume we want the material across the whole edge
-        if (CornerIndex != -1)
+        if (CornerIndex != -1 && CornerIndex != 2)
         {
             mats[cornerIndicies[EdgeIndex][CornerIndex]] = mat;
+            if (CornerIndex == 0)//Left corner, whole thing
+                mats[cornerIndicies[(EdgeIndex + 5) % 6][1]] = mat;
+            else //Right corner, whole thing
+                mats[cornerIndicies[(EdgeIndex + 1) % 6][0]] = mat;
+
+            return;
+        }
+        if (CornerIndex == 2) //We'll assume we just want to set the center of the edge, leaving the corners as is.
+        {
+            mats[edgeIndicies[EdgeIndex]] = mat;
             return;
         }
         mats[edgeIndicies[EdgeIndex]] = mat;
@@ -145,7 +155,6 @@ public class TilePool : MonoBehaviour
         moveOffset += movement;
     }
 
-
     public void GeneratePool(int size)
     {
         tiles = new List<GameObject>(size);
@@ -175,6 +184,7 @@ public class TilePool : MonoBehaviour
         float y = centerPosition.y - (rowOffset.y * playMatSize.y) / 2 + rowOffset.y / 2;
         firstTileOffset = new Vector2(x, y);
 
+        List<Vector3Int> changedTiles = new List<Vector3Int>();
 
         int tileIndex = 0;
         for (int row = 0; row < playMatSize.y; row++)
@@ -191,15 +201,36 @@ public class TilePool : MonoBehaviour
                 tiles[tileIndex].transform.position = new Vector3(offset.x, 0, offset.y);
                 tiles[tileIndex].SetActive(true);
 
+                //TODO: This is very heavy, so get rid of this for releases.
+                HexData hexData = worldManager.world.GetCellData(worldManager.world.OddRToCube(BottomLeftMapCoord.x + col, BottomLeftMapCoord.y + row));
+                TilePacker tilePacker = worldManager.tilePacker;
+                tilePacker.SetPackedTile(hexData); //Don't need the corner data here, so just send 0
+                int[] biomes = new int[7];
+                biomes = tilePacker.biomes;
+                bool[] blends = new bool[6];
+                bool[] sameIndex = new bool[6];
+                for (int j = 0; j < 6; j++)
+                {
+                    blends[j] = tilePacker.edgeBlends[j].isBlend;
+                    sameIndex[j] = tilePacker.edgeBlends[j].isSameIndex;
+                }
+
+
                 tiles[tileIndex].GetComponent<TileData>().gridPos = worldManager.world.OddRToCube(BottomLeftMapCoord.x + col, BottomLeftMapCoord.y + row);
-                tiles[tileIndex].GetComponent<TileData>().tileID = worldManager.world.GetCellBin(worldManager.world.OddRToCube(BottomLeftMapCoord.x + col, BottomLeftMapCoord.y + row));
+                tiles[tileIndex].GetComponent<TileData>().tileID = hexData.ID;
                 tiles[tileIndex].GetComponent<TileData>().playmatPos = playmat.OddRToCube(col, row);
+                tiles[tileIndex].GetComponent<TileData>().unpacked = (int[])biomes.Clone();
+                tiles[tileIndex].GetComponent<TileData>().blends = (bool[])blends.Clone();
+                tiles[tileIndex].GetComponent<TileData>().sameIndex = (bool[])sameIndex.Clone();
+
+
+                changedTiles.Add(tiles[tileIndex].GetComponent<TileData>().gridPos);
                 tileIndex++;
             }
         }
         neighborTilesTable = new Vector3Int[playmatSize.x * playmatSize.y * 6];
         matCache = new Material[playmatSize.x * playmatSize.y][];
-        FetchTiles();
+        FetchTiles(changedTiles.ToArray()); //New version
     }
 
     //Move tiles from offscreen to onscreen
@@ -226,6 +257,7 @@ public class TilePool : MonoBehaviour
                 rendererCache.RemoveAt(i);
                 movedTile.GetComponent<TileData>().gridPos = worldManager.world.OddRToCube(BottomLeftMapCoord.x + ((playMatWidth - 1)), BottomLeftMapCoord.y + (i / playMatWidth));
                 changedTiles.Add(movedTile.GetComponent<TileData>().gridPos);
+
             }
 
         }
@@ -329,9 +361,23 @@ public class TilePool : MonoBehaviour
         }
         for (int i = 0; i < tiles.Count; i++)
         {
-            //tiles[i].GetComponent<TileData>().gridPos = worldManager.world.OddRToCube(BottomLeftMapCoord.x + (i % playMatWidth), BottomLeftMapCoord.y + (i / playMatWidth));
-            tiles[i].GetComponent<TileData>().tileID = worldManager.world.GetCellBin(worldManager.world.OddRToCube(BottomLeftMapCoord.x + (i % playMatWidth), BottomLeftMapCoord.y + (i / playMatWidth)));
+            //TODO: this is VERY heavy, get rid of this when not debugging
+            tiles[i].GetComponent<TileData>().tileID = worldManager.world.GetCellID(worldManager.world.OddRToCube(BottomLeftMapCoord.x + (i % playMatWidth), BottomLeftMapCoord.y + (i / playMatWidth)));
             tiles[i].GetComponent<TileData>().playmatPos = playmat.OddRToCube(i % playMatWidth, i / playMatWidth);
+            TilePacker tilePacker = worldManager.tilePacker;
+            tilePacker.SetPackedTile(worldManager.world.GetCellData(worldManager.world.OddRToCube(BottomLeftMapCoord.x + (i % playMatWidth), BottomLeftMapCoord.y + (i / playMatWidth))));
+            int[] biomes = new int[7];
+            bool[] blends = new bool[6];
+            bool[] sameIndex = new bool[6];
+            for (int j = 0; j < 6; j++)
+            {
+                blends[j] = tilePacker.edgeBlends[j].isBlend;
+                sameIndex[j] = tilePacker.edgeBlends[j].isSameIndex;
+            }
+            biomes = tilePacker.biomes;
+            tiles[i].GetComponent<TileData>().unpacked = (int[])biomes.Clone();
+            tiles[i].GetComponent<TileData>().blends = (bool[])blends.Clone();
+            tiles[i].GetComponent<TileData>().sameIndex = (bool[])sameIndex.Clone();    
         }
 
         //FetchTiles();
@@ -340,169 +386,13 @@ public class TilePool : MonoBehaviour
 
     }
 
-    private void FetchTiles()
-    {
-        Material[] tileMats = worldManager.fetch(BottomLeftMapCoord, playmatSize);
-        bool debugMode = worldManager.debugMode;
-
-        for (int i = 0; i < tiles.Count; i++)
-        {
-            int matIndex = i * 7;
-            if (tileMats[matIndex] == null)
-            {
-                tiles[i].SetActive(false);
-                matCache[i] = null;
-                continue;
-            }
-            else
-            {
-                tiles[i].SetActive(true);
-                if (debugMode)
-                {
-                    //Create text to show the cell value
-                    GameObject textObj = tiles[i].transform.Find("CellValueText")?.gameObject;
-                    if (textObj == null)
-                    {
-                        textObj = new GameObject("CellValueText");
-                        textObj.transform.SetParent(tiles[i].transform);
-                        textObj.transform.localPosition = new Vector3(0, 0.1f, 0);
-                        textObj.transform.localRotation = Quaternion.Euler(0, 0, 0);
-                        TextMesh textMesh = textObj.AddComponent<TextMesh>();
-                        textMesh.characterSize = 1.0f;
-                        textMesh.anchor = TextAnchor.MiddleCenter;
-                        textMesh.color = Color.white;
-                    }
-                    TextMesh existingTextMesh = textObj.GetComponent<TextMesh>();
-                    existingTextMesh.fontSize = 1;
-                    int cellX = BottomLeftMapCoord.x + (i % playmatSize.x);
-                    int cellY = BottomLeftMapCoord.y + (i / playmatSize.x);
-                    Vector3Int vector3Int = worldManager.world.OddRToCube(cellY, cellX);
-                    existingTextMesh.text = vector3Int.ToString();
-                }
-                else
-                {
-                    Transform textTransform = tiles[i].transform.Find("CellValueText");
-                    if (textTransform != null)
-                    {
-                        Destroy(textTransform.gameObject);
-                    }
-                }
-            }
-            Renderer tileRenderer = rendererCache[i];
-            Material[] sharedMats = tileRenderer.sharedMaterials;
-
-            Vector3Int pos = playmat.IndexToCube(i);
-
-            TileWrapper.SetCoreMaterial(tileMats[matIndex], sharedMats); //Main
-            TileWrapper.SetEdge(tileMats[matIndex + 1], sharedMats, 0); //Edge A
-            TileWrapper.SetEdge(tileMats[matIndex + 2], sharedMats, 1); //Edge B
-            TileWrapper.SetEdge(tileMats[matIndex + 3], sharedMats, 2); //Edge C
-            TileWrapper.SetEdge(tileMats[matIndex + 4], sharedMats, 3); //Edge D
-            TileWrapper.SetEdge(tileMats[matIndex + 5], sharedMats, 4); //Edge E
-            TileWrapper.SetEdge(tileMats[matIndex + 6], sharedMats, 5); //Edge F
-            tileRenderer.sharedMaterials = sharedMats;
-            matCache[i] = sharedMats;
-        }
-        RenderCacheSize = rendererCache.Count;
-
-        Vector2Int cellRowCol = new Vector2Int(0, 0);
-        Vector3Int cellCoord = new Vector3Int(0, 0, 0);
-        Vector3Int[] neighborCoords = new Vector3Int[6];
-        for (int i = 0; i < tiles.Count; i++)
-        {
-            cellRowCol.x = BottomLeftMapCoord.x + (i % playmatSize.x);
-            cellRowCol.y = BottomLeftMapCoord.y + (i / playmatSize.x);
-            cellCoord = worldManager.world.OddRToCube(cellRowCol.x, cellRowCol.y);
-            worldManager.world.GetNeighbourCoords(cellCoord, ref neighborCoords);
-            neighborTilesTable[i * 6 + 0] = neighborCoords[0]; //NE
-            neighborTilesTable[i * 6 + 1] = neighborCoords[1]; //E
-            neighborTilesTable[i * 6 + 2] = neighborCoords[2]; //SE
-            neighborTilesTable[i * 6 + 3] = neighborCoords[3]; //SW
-            neighborTilesTable[i * 6 + 4] = neighborCoords[4]; //W
-            neighborTilesTable[i * 6 + 5] = neighborCoords[5]; //NW
-        }
-
-        //Second loop, blend the tiles. For example, if Tile A is up and the the right of B, and the C edge is beach on A, and the B edge is beach on B, we can set the corner of the edge between them to beach as well, so the beach is continuous.
-        for (int i = 0; i < tiles.Count; i++)
-        {
-            int neighbor1Index = 5; //The top left neighbor, we'll need to handle wrapping
-            int neighbor2Index = 1; //The right neighbor
-            int neighbor1CheckIndex = 1; //The edge index to check on neighbor 1
-            int neighbor2CheckIndex = 5; //The edge index to check on neighbor 2
-
-
-            Renderer tileRenderer = rendererCache[i];
-            if (tileRenderer == null)
-                continue;
-            Material[] tileMatsCurrent = matCache[i];
-            if (tileMatsCurrent == null)
-                continue;
-            for (int edgeIndex = 0; edgeIndex < 6; edgeIndex++)
-            {
-                Vector3Int neighborCoord = neighborTilesTable[i * 6 + neighbor1Index]; //The coord of the neighbour in the world
-                Vector3Int neighborOneLocal = new Vector3Int(-1, -1, -1);
-                if (!(neighborCoord.x == -1 && neighborCoord.y == -1 && neighborCoord.z == -1))
-                    neighborOneLocal = WorldCoordsToPlaymatCoords(neighborCoord);
-
-                neighborCoord = neighborTilesTable[i * 6 + neighbor2Index];
-                Vector3Int neighborTwoLocal = new Vector3Int(-1, -1, -1);
-                if (!(neighborCoord.x == -1 && neighborCoord.y == -1 && neighborCoord.z == -1))
-                    neighborTwoLocal = WorldCoordsToPlaymatCoords(neighborCoord);
-
-                //For each edge, I basically need to check the neighbor to each side of it, instead of straight across. The NE edge, for example, needs to check the E and NW neighbors. This is very specific, and might just be easiest to do a switch case, but we'll try with logic for now
-                //This is tricky, because I need the actual tile next to us, not just the data of said tile, because I need to compare materials.
-
-                Renderer neighbor1Tile = null;
-                Renderer neighbor2Tile = null;
-                int neighbor1LocalIndex = 0; //Index in the matCache and the rendererCache
-                int neighbor2LocalIndex = 0; //Index in the matCache and the rendererCache
-                if (neighborOneLocal != new Vector3Int(-1, -1, -1)) //Invalid coord
-                {
-                    neighbor1LocalIndex = playmat.OddRToIndex(neighborOneLocal);
-                }
-                if (neighborTwoLocal != new Vector3Int(-1, -1, -1))
-                {
-                    neighbor2LocalIndex = playmat.OddRToIndex(neighborTwoLocal);
-                }
-                if (playmat.IsValidCoordinate(neighborOneLocal))
-                    neighbor1Tile = rendererCache[neighbor1LocalIndex];
-                if (playmat.IsValidCoordinate(neighborTwoLocal))
-                    neighbor2Tile = rendererCache[neighbor2LocalIndex];
-                //A little gross, but I can add a GetTileAtCoord function later to the TilePool to make this cleaner
-                Material currentEdgeMat = TileWrapper.GetEdge(edgeIndex, tileMatsCurrent);
-                if (neighbor1Tile != null)
-                {
-                    Material neighbor1EdgeMat = TileWrapper.GetEdge(neighbor1CheckIndex, matCache[neighbor1LocalIndex]);
-                    if (neighbor1EdgeMat == currentEdgeMat)
-                    {
-                        //Set corner material
-                        TileWrapper.SetEdge(currentEdgeMat, tileMatsCurrent, neighbor1Index, 1); //Corner on current tile
-                    }
-                }
-                if (neighbor2Tile != null)
-                {
-                    Material neighbor2EdgeMat = TileWrapper.GetEdge(neighbor2CheckIndex, matCache[neighbor2LocalIndex]);
-                    if (neighbor2EdgeMat != null && neighbor2EdgeMat == currentEdgeMat)
-                    {
-                        //Set corner material
-                        TileWrapper.SetEdge(currentEdgeMat, tileMatsCurrent, neighbor2Index, 0); //Corner on current tile
-                    }
-                }
-                //Increment
-                neighbor1Index = (neighbor1Index + 1) % 6;
-                neighbor2Index = (neighbor2Index + 1) % 6;
-                neighbor1CheckIndex = (neighbor1CheckIndex + 1) % 6;
-                neighbor2CheckIndex = (neighbor2CheckIndex + 1) % 6;
-            }
-            tileRenderer.sharedMaterials = tileMatsCurrent;
-        }
-    }
 
     private void FetchTiles(Vector3Int[] globalTileCoords) //Overload for specific tiles, better for scrolling
     {
         Vector3Int worldCoords = new Vector3Int();
         Material[] tileMats = worldManager.fetch(globalTileCoords);
         int playmatIndex = 0;
+        TilePacker tilePacker = worldManager.tilePacker;
 
         for (int i = 0; i < globalTileCoords.Length; i++)
         {
@@ -530,107 +420,168 @@ public class TilePool : MonoBehaviour
 
             Vector3Int pos = playmat.IndexToCube(playmatIndex);
             TileWrapper.SetCoreMaterial(tileMats[i * 7], sharedMats); //Main
-            TileWrapper.SetEdge(tileMats[i * 7 + 1], sharedMats, 0); //Edge A
-            TileWrapper.SetEdge(tileMats[i * 7 + 2], sharedMats, 1); //Edge B
-            TileWrapper.SetEdge(tileMats[i * 7 + 3], sharedMats, 2); //Edge C
-            TileWrapper.SetEdge(tileMats[i * 7 + 4], sharedMats, 3); //Edge D
-            TileWrapper.SetEdge(tileMats[i * 7 + 5], sharedMats, 4); //Edge E
-            TileWrapper.SetEdge(tileMats[i * 7 + 6], sharedMats, 5); //Edge F
+            HexData hexData = worldManager.world.GetCellData(worldCoords);
+            tilePacker.SetPackedTile(hexData.ID, hexData.cornerFlags); 
+
+
+            for (int j = 1; j < 7; j++)
+            {
+                TileWrapper.SetEdge(tileMats[i * 7 + j], sharedMats, j - 1, -1); //Edges A-F, whole edge
+            }
+            for (int j = 0; j < 6; j++)
+            {
+                //For now, if the flags are (true, false), set the corner to the debug material
+                //if (tilePacker.edgeBlends[j].isBlend && !tilePacker.edgeBlends[j].isSameIndex)
+                //    TileWrapper.SetEdge(worldManager.DevMat, sharedMats, j, 1); //Set the center of the edge to the edge material, so we can see the blends more clearly for debugging
+
+
+                if (tilePacker.edgeBlends[j].isBlend)
+                {
+                    if (!tilePacker.edgeBlends[j].isSameIndex) // (true, false)
+                    {
+                        TileWrapper.SetEdge(tileMats[i * 7 + 1 + ((j + 1) % 6)], sharedMats, j, 1); //Blend second corner with next edge's material
+                    }
+                    else //(true, true)
+                    {
+                        TileWrapper.SetEdge(tileMats[i * 7 + 1 + j], sharedMats, j, 1); //Blend second corner with same edge's material
+
+                    }
+                }
+                //if (tilePacker.edgeBlends[(j + 5) % 6].isBlend) //Don't think I need this? I'll check
+                //{
+                //    if (!tilePacker.edgeBlends[(j + 5) % 6].isSameIndex)
+                //    {
+                //        TileWrapper.SetEdge(tileMats[i * 7 + 1 + ((j + 5) % 6)], sharedMats, j, 0); //Blend first corner with previous edge's material
+                //    }
+                //}
+
+                //int prev = (j + 5) % 6;
+                //int next = (j + 1) % 6;
+
+                //// RIGHT corner of edge j is controlled by edgeBlends[j]
+                //if (tilePacker.edgeBlends[j].isBlend)
+                //{
+                //    int matEdge = tilePacker.edgeBlends[j].isSameIndex ? j : next;
+                //    TileWrapper.SetEdge(tileMats[i * 7 + 1 + matEdge], sharedMats, j, 1);
+                //}
+
+                //// LEFT corner of edge j is controlled by edgeBlends[prev]
+                //if (tilePacker.edgeBlends[prev].isBlend)
+                //{
+                //    // If prev blends with SAME index -> use prev edge material
+                //    // If prev blends with NEXT index -> next of prev is j -> use j edge material
+                //    int matEdge = tilePacker.edgeBlends[prev].isSameIndex ? prev : j;
+                //    TileWrapper.SetEdge(tileMats[i * 7 + 1 + matEdge], sharedMats, j, 0);
+                //}
+
+            }
+
             tileRenderer.sharedMaterials = sharedMats;
             matCache[playmatIndex] = sharedMats;
         }
+        //Commented out, corner blending will be done by the worldgen now, the pool needs to only translate the data.
 
         //Get the neighbor table for only the changed tiles
-        Vector3Int[] neighborCoords = new Vector3Int[6];
-        for (int i = 0; i < globalTileCoords.Length; i++)
-        {
-            worldManager.world.GetNeighbourCoords(globalTileCoords[i], ref neighborCoords);
-            int playmatIndexLocal = playmat.OddRToIndex(WorldCoordsToPlaymatCoords(globalTileCoords[i]));
-            if (playmatIndexLocal < 0 || playmatIndexLocal >= tiles.Count)
-                continue;
-            neighborTilesTable[playmatIndexLocal * 6 + 0] = neighborCoords[0]; //NE
-            neighborTilesTable[playmatIndexLocal * 6 + 1] = neighborCoords[1]; //E
-            neighborTilesTable[playmatIndexLocal * 6 + 2] = neighborCoords[2]; //SE
-            neighborTilesTable[playmatIndexLocal * 6 + 3] = neighborCoords[3]; //SW
-            neighborTilesTable[playmatIndexLocal * 6 + 4] = neighborCoords[4]; //W
-            neighborTilesTable[playmatIndexLocal * 6 + 5] = neighborCoords[5]; //NW
-        }
+        //Vector3Int[] neighborCoords = new Vector3Int[6];
+        //for (int i = 0; i < globalTileCoords.Length; i++)
+        //{
+        //    worldManager.world.GetNeighbourCoords(globalTileCoords[i], ref neighborCoords);
+        //    int playmatIndexLocal = playmat.OddRToIndex(WorldCoordsToPlaymatCoords(globalTileCoords[i]));
+        //    if (playmatIndexLocal < 0 || playmatIndexLocal >= tiles.Count)
+        //        continue;
+        //    neighborTilesTable[playmatIndexLocal * 6 + 0] = neighborCoords[0]; //NE
+        //    neighborTilesTable[playmatIndexLocal * 6 + 1] = neighborCoords[1]; //E
+        //    neighborTilesTable[playmatIndexLocal * 6 + 2] = neighborCoords[2]; //SE
+        //    neighborTilesTable[playmatIndexLocal * 6 + 3] = neighborCoords[3]; //SW
+        //    neighborTilesTable[playmatIndexLocal * 6 + 4] = neighborCoords[4]; //W
+        //    neighborTilesTable[playmatIndexLocal * 6 + 5] = neighborCoords[5]; //NW
+        //}
 
 
-        RenderCacheSize = rendererCache.Count; //Debugging purposes
 
+        //RenderCacheSize = rendererCache.Count; //Debugging purposes
         //Second loop, blend the tiles. For example, if Tile A is up and the the right of B, and the C edge is beach on A, and the B edge is beach on B, we can set the corner of the edge between them to beach as well, so the beach is continuous.
-        for (int i = 0; i < globalTileCoords.Length; i++)
-        {
-            int neighbor1Index = 5; //The top left neighbor, we'll need to handle wrapping
-            int neighbor2Index = 1; //The right neighbor
-            int neighbor1CheckIndex = 1; //The edge index to check on neighbor 1
-            int neighbor2CheckIndex = 5; //The edge index to check on neighbor 2
-            Vector3Int tile = globalTileCoords[i];
-            int index = playmat.OddRToIndex(WorldCoordsToPlaymatCoords(tile));
+        //for (int i = 0; i < globalTileCoords.Length; i++)
+        //{
+        //    int neighbor1Index = 5; //The top left neighbor, we'll need to handle wrapping
+        //    int neighbor2Index = 1; //The right neighbor
+        //    int neighbor1CheckIndex = 1; //The edge index to check on neighbor 1
+        //    int neighbor2CheckIndex = 5; //The edge index to check on neighbor 2
+        //    Vector3Int tile = globalTileCoords[i];
+        //    int index = playmat.OddRToIndex(WorldCoordsToPlaymatCoords(tile));
 
-            TilePacker packer = new TilePacker(new int[7] { 0, 0, 0, 0, 0, 0, 0}, worldManager.matList.Count);
-            ulong currentTileID = worldManager.world.GetCellBin(tile);
-            packer.SetPackedTile(currentTileID);
-            int[] mainBiomes = packer.biomes;
-
-
-            Renderer tileRenderer = null;
-            if (index >= 0 && index < tiles.Count)
-                tileRenderer = rendererCache[index];
-            if (tileRenderer == null)
-                continue;
-            Material[] tileMatsCurrent = matCache[index];
-            if (tileMatsCurrent == null)
-                continue;
-            for (int edgeIndex = 0; edgeIndex < 6; edgeIndex++)
-            {
-                Vector3Int neighborCoord = neighborTilesTable[index * 6 + neighbor1Index]; //The coord of the neighbour in the world
-                ulong neighborTileID = worldManager.world.GetCellBin(neighborCoord);
-                int[] neighbor1Biomes = new int[7];
-                if (neighborTileID != ulong.MaxValue)
-                {
-                    packer.SetPackedTile(neighborTileID);
-                    neighbor1Biomes = packer.biomes;
-                }
-                else
-                    neighbor1Biomes = null;
+        //    TilePacker packer = new TilePacker(new int[7] { 0, 0, 0, 0, 0, 0, 0}, worldManager.matList.Count);
+        //    ulong currentTileID = worldManager.world.GetCellBin(tile);
+        //    packer.SetPackedTile(currentTileID);
+        //    int[] mainBiomes = packer.biomes;
 
 
-                neighborCoord = neighborTilesTable[index * 6 + neighbor2Index];
-                neighborTileID = worldManager.world.GetCellBin(neighborCoord);
-                int[] neighbor2Biomes = new int[7];
-                if (neighborTileID != ulong.MaxValue)
-                {
-                    packer.SetPackedTile(neighborTileID);
-                    neighbor2Biomes = packer.biomes;
-                }
-                else
-                    neighbor2Biomes = null;
+        //    Renderer tileRenderer = null;
+        //    if (index >= 0 && index < tiles.Count)
+        //        tileRenderer = rendererCache[index];
+        //    if (tileRenderer == null)
+        //        continue;
+        //    Material[] tileMatsCurrent = matCache[index];
+        //    if (tileMatsCurrent == null)
+        //        continue;
+        //    for (int edgeIndex = 0; edgeIndex < 6; edgeIndex++)
+        //    {
+        //        Vector3Int neighborCoord = neighborTilesTable[index * 6 + neighbor1Index]; //The coord of the neighbour in the world
+        //        ulong neighborTileID = worldManager.world.GetCellBin(neighborCoord);
+        //        int[] neighbor1Biomes = new int[7];
+        //        if (neighborTileID != ulong.MaxValue)
+        //        {
+        //            packer.SetPackedTile(neighborTileID);
+        //            neighbor1Biomes = packer.biomes;
+        //        }
+        //        else
+        //            neighbor1Biomes = null;
 
-                if (neighbor1Biomes != null)
-                {
-                    if (mainBiomes[edgeIndex + 1] == neighbor1Biomes[neighbor1CheckIndex + 1]) //Have to add one because of the core
-                    {
-                        TileWrapper.SetEdge(TileWrapper.GetEdge(edgeIndex, tileMatsCurrent), tileMatsCurrent, neighbor1Index, 1); //Corner on current tile
-                    }
-                }
-                if (neighbor2Biomes != null)
-                {
-                    if (mainBiomes[edgeIndex + 1] == neighbor2Biomes[neighbor2CheckIndex + 1]) //Have to add one because of the core
-                    {
-                        TileWrapper.SetEdge(TileWrapper.GetEdge(edgeIndex, tileMatsCurrent), tileMatsCurrent, neighbor2Index, 0); //Corner on current tile
-                    }
-                }
 
-                //Increment
-                neighbor1Index = (neighbor1Index + 1) % 6;
-                neighbor2Index = (neighbor2Index + 1) % 6;
-                neighbor1CheckIndex = (neighbor1CheckIndex + 1) % 6;
-                neighbor2CheckIndex = (neighbor2CheckIndex + 1) % 6;
-            }
-            tileRenderer.sharedMaterials = tileMatsCurrent;
-        }
+        //        neighborCoord = neighborTilesTable[index * 6 + neighbor2Index];
+        //        neighborTileID = worldManager.world.GetCellBin(neighborCoord);
+        //        int[] neighbor2Biomes = new int[7];
+        //        if (neighborTileID != ulong.MaxValue)
+        //        {
+        //            packer.SetPackedTile(neighborTileID);
+        //            neighbor2Biomes = packer.biomes;
+        //        }
+        //        else
+        //            neighbor2Biomes = null;
+
+        //        if (neighbor1Biomes != null)
+        //        {
+        //            //If the cores match the edges we're trying to blend, we don't have to blend, this is finicky to fix river blending, may need to look into this better in future.
+        //            if ((mainBiomes[edgeIndex + 1] == neighbor1Biomes[neighbor1CheckIndex + 1] || mainBiomes[edgeIndex+ 1] == neighbor1Biomes[((neighbor1CheckIndex + 1) % 6) + 1]) && mainBiomes[edgeIndex + 1] != mainBiomes[0]) //Have to add one because of the core
+        //            {
+        //                //Check if the edge we're writing to is water, if so, don't write to it.
+        //                if (mainBiomes[neighbor1Index + 1] != 0) //Water edge, skip
+        //                {
+        //                    TileWrapper.SetEdge(TileWrapper.GetEdge(edgeIndex, tileMatsCurrent), tileMatsCurrent, neighbor1Index, 1); //Corner on current tile
+        //                }
+        //            }
+        //        }
+        //        if (neighbor2Biomes != null)
+        //        {
+        //            if ((mainBiomes[edgeIndex + 1] == neighbor2Biomes[neighbor2CheckIndex + 1] || mainBiomes[edgeIndex + 1] == neighbor2Biomes[((neighbor2CheckIndex + 5) % 6) + 1]) && mainBiomes[edgeIndex + 1] != mainBiomes[0]) //Have to add one because of the core
+        //            {
+        //                //Check if the edge we're writing to is water, if so, don't write to it.
+        //                if (mainBiomes[neighbor2Index + 1] != 0) //Water edge, skip
+        //                {
+        //                    TileWrapper.SetEdge(TileWrapper.GetEdge(edgeIndex, tileMatsCurrent), tileMatsCurrent, neighbor2Index, 0); //Corner on current tile
+        //                }
+
+        //            }
+        //        }
+
+        //        //Increment
+        //        neighbor1Index = (neighbor1Index + 1) % 6;
+        //        neighbor2Index = (neighbor2Index + 1) % 6;
+        //        neighbor1CheckIndex = (neighbor1CheckIndex + 1) % 6;
+        //        neighbor2CheckIndex = (neighbor2CheckIndex + 1) % 6;
+        //    }
+        //    tileRenderer.sharedMaterials = tileMatsCurrent;
+        //}
     }
     Vector3Int WorldCoordsToPlaymatCoords(Vector3Int worldCoords)
     {

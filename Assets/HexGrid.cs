@@ -10,6 +10,14 @@ enum HexDirection //An easier way to convert directions to indices
     NW
 }
 
+public struct HexData
+{
+    public ulong ID;
+    public ushort cornerFlags; //2 flags per corner, 1 for if we're blending, and the other for if the its blending with the same edge as the corner index, or the next edge clockwise.
+    //Techically, according to some sources, Unity will auto align this to the nearest multiple of 8 bytes, so this struct will be 16 bytes in size.
+    //This means we could have another ushort for more data without any extra memory cost, but for now this is fine.
+}
+
 
 public class HexGrid
 {
@@ -18,7 +26,8 @@ public class HexGrid
     private int height;
     //TODO: reprisent each hex in binary, for light storage and effeciency
     private int[] cells;
-    private ulong[] cellsBin;
+    //private ulong[] cellsBin;
+    private HexData[] cellsData;
     public bool oddR = true; //Whether the grid uses odd-r offset coordinates, currently only really used for checking if a coordinate is valid
     private Vector3Int[] neighborLookups = new Vector3Int[6] {
             new Vector3Int(0, -1, 1), //NE
@@ -35,8 +44,9 @@ public class HexGrid
 
         this.width = width;
         this.height = height;
-        this.cells = new int[width * height];
-        this.cellsBin = new ulong[width * height];
+        this.cells = new int[width * height]; //TODO: look into getting rid of this, currently used for very basic storage for stuff like basic clouds, where we don't *need* all the data, just the cores.
+        //this.cellsBin = new ulong[width * height]; //TODO: Get rid of this. 
+        this.cellsData = new HexData[width * height];
     }
     public int GetCell(Vector3Int coord)
     {
@@ -46,7 +56,6 @@ public class HexGrid
             cell = cells[OddRToIndex(coord)];
         return cell;
     }
-
     public void SetCell(Vector3Int coord, int value)
     {
         if (IsValidCoordinate(coord))
@@ -54,22 +63,65 @@ public class HexGrid
         else
             throw new System.IndexOutOfRangeException("Invalid hex grid coordinates");
     }
-    public ulong GetCellBin(Vector3Int coord)
+
+    public HexData GetCellData(Vector3Int coord)
     {
-        ulong cell = ulong.MaxValue;
+        HexData cell = new HexData();
+        cell.ID = ulong.MaxValue;
+        cell.cornerFlags = ushort.MaxValue;
         //OddR system
         if (IsValidCoordinate(coord))
-            cell = cellsBin[OddRToIndex(coord)];
+        {
+            //Might need to copy these, we'll see.
+            cell.ID = cellsData[OddRToIndex(coord)].ID;
+            cell.cornerFlags = cellsData[OddRToIndex(coord)].cornerFlags;
+        }
         return cell;
     }
-    public void SetCellBin(Vector3Int coord, ulong value)
+    public void SetCellBin(Vector3Int coord, HexData data)
     {
         if (IsValidCoordinate(coord))
-            cellsBin[OddRToIndex(coord)] = value;
+        {
+            cellsData[OddRToIndex(coord)].ID = data.ID;
+            cellsData[OddRToIndex(coord)].cornerFlags = data.cornerFlags;
+        }
         else
             throw new System.IndexOutOfRangeException("Invalid hex grid coordinates");
     }
+    public void SetCellBin(Vector3Int coord, ulong ID, ushort cornerFlags)
+    {
+        if (IsValidCoordinate(coord))
+        {
+            cellsData[OddRToIndex(coord)].ID = ID;
+            cellsData[OddRToIndex(coord)].cornerFlags = cornerFlags;
+        }
+        else
+            throw new System.IndexOutOfRangeException("Invalid hex grid coordinates");
+    }
+    public ulong GetCellID(Vector3Int coord)
+    {
+        ulong cellID = ulong.MaxValue;
+        //OddR system
+        if (IsValidCoordinate(coord))
+            cellID = cellsData[OddRToIndex(coord)].ID;
+        return cellID;
+    }
 
+    //public HexData GetCellData(Vector3Int coord)
+    //{
+    //    HexData cell = new HexData();
+    //    //OddR system
+    //    if (IsValidCoordinate(coord))
+    //        cell = cellsData[OddRToIndex(coord)];
+    //    return cell;
+    //}
+    //public void SetCellData(Vector3Int coord, HexData value)
+    //{
+    //    if (IsValidCoordinate(coord))
+    //        cellsData[OddRToIndex(coord)] = value;
+    //    else
+    //        throw new System.IndexOutOfRangeException("Invalid hex grid coordinates");
+    //}
     public bool IsValidCoordinate(Vector3Int coord)
     {
         //New OddR system effectively;
@@ -187,6 +239,28 @@ public class HexGrid
         int y = -row;
         int x = -y - z;
         return new Vector3Int(x, y, z);
+    }
+
+    public Vector3 GetRandomCubeDirectionVector()
+    {
+        // random 2D angle
+        float a = (float)(Random.Range(0.0f, 1.0f) * Mathf.PI * 2.0);
+        // map angle onto cube plane basis vectors
+        // basis1 = (1,-1,0), basis2 = (1,0,-1)
+        Vector3 b1 = new Vector3(1, -1, 0);
+        Vector3 b2 = new Vector3(1, 0, -1);
+
+        Vector3 h = Mathf.Cos(a) * b1 + Mathf.Sin(a) * b2;
+        // enforce exact plane (optional, mostly already true)
+        h.z = -h.x - h.y;
+        return CubeNormalize(h);
+    }
+
+    static Vector3 CubeNormalize(Vector3 d)
+    {
+        float mag = Mathf.Sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        if (mag < 1e-6f) return new Vector3(1, -1, 0); // fallback
+        return d / mag;
     }
 
 

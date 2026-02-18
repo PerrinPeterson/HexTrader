@@ -467,6 +467,7 @@ MonoBehaviour:
   DevMat: {fileID: 2100000, guid: d49a319f1364c0e4f914033419d67507, type: 2}
   mountainDivisor: 10
   MinMaxMountainStrength: {x: 3, y: 8}
+  lakeDensity: 1
   debugMode: 0
 --- !u!4 &814580881
 Transform:
