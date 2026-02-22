@@ -4,8 +4,6 @@ using System.Drawing;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Xml;
-using UnityEditor.ShaderGraph.Internal;
-using UnityEditor.TerrainTools;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -52,7 +50,6 @@ public class WorldManager : MonoBehaviour
     public HexGrid world;
     public List<Material> matList = new List<Material>();
     public Material DevMat;
-    private HexCloudGen cloudGen;
     private Material[] viewBuffer = null;
     public int mountainDivisor = 10; //Higher number means less mountains
     public Vector2Int MinMaxMountainStrength = new Vector2Int(3, 8); //a mountain spawner pushes other mountains up by a random amount in this range
@@ -104,7 +101,6 @@ public class WorldManager : MonoBehaviour
     public void Init()
     {
         world = new HexGrid(worldSize.x, worldSize.y);
-        cloudGen = transform.GetComponent<HexCloudGen>();
         tilePacker = new TilePacker(new int[7], matList.Count(), new (bool, bool)[7]);
         GenerateWorld();
     }
@@ -117,11 +113,13 @@ public class WorldManager : MonoBehaviour
 
     private void GenerateWorld()
     {
+
+        UnityEngine.Random.InitState(12345);
         //temperary, just make each tile a grass tile for now
         //In future these will be a lot more complex, for now we'll just hard code.
         //Water = 0, Grass = 1
 
-        world = cloudGen.GenHexCloud(world, tilePacker);
+        world = HexCloudGen.GenHexCloud(world, tilePacker);
         //Now we clean up the coast line, adding in beaches and shallows
         //If 4 or more adjacent tiles are different biomes, convert the tile to the border biome
         world = CleanCoastline(world);
@@ -131,14 +129,15 @@ public class WorldManager : MonoBehaviour
 
         world = AddMountains(world);
 
-        world = AddRiversLakes(world);
-
         //Apply the edge cases
         world = ApplyEdges(world);
 
-        //TODO: Replace the corner blending with a function that can take in specific biomes it's allowed to blend.
+        world = Blend(world); //Blending pass for the corners, all biomes.
 
-        // world = CleanEdges(world); //Final pass to apply edge blending between biomes
+        world = AddRiversLakes(world);
+
+        world = Blend(world, coreBlackList: new[] { BiomeType.Water }, edgeWhiteList: new[] {BiomeType.Water});
+
     }
 
     public void Regen()
@@ -146,13 +145,14 @@ public class WorldManager : MonoBehaviour
         Init();
     }
 
+    //Replaces water and grass tiles that are mostly surrouded with tiles of the other type. This makes coastlines feel a bit softer.
     private HexGrid CleanCoastline(HexGrid grid)
     {
         Vector3Int[] neighbors = new Vector3Int[6];
         Vector3Int cubeCoord = new Vector3Int();
         TileConfig tileConfig = new TileConfig();
         tileConfig.biomes = new int[matList.Count];
-        for (int cellIndex = 0; cellIndex < grid.size(); cellIndex++)
+        for (int cellIndex = 0; cellIndex < grid.GetCellCount(); cellIndex++)
         {
             cubeCoord = grid.IndexToCube(cellIndex);
             int cell = grid.GetCell(cubeCoord);
@@ -217,9 +217,9 @@ public class WorldManager : MonoBehaviour
     private HexGrid AddForest(HexGrid grid)
     {
         //We'll use another cloud gen for this, but with some random pressures and weights, and then we'll use the main grid as a mask to only add forests to grass tiles
-        HexGrid forestCloud = cloudGen.GenHexCloud(new HexGrid(grid.dimensions().x, grid.dimensions().y), tilePacker, false, 12, 20);
+        HexGrid forestCloud = HexCloudGen.GenHexCloud(new HexGrid(grid.GetDimensions().x, grid.GetDimensions().y), tilePacker, 12, 20);
         Vector3Int cellCoord = new Vector3Int();
-        for (int cellIndex = 0; cellIndex < grid.size(); cellIndex++)
+        for (int cellIndex = 0; cellIndex < grid.GetCellCount(); cellIndex++)
         {
             cellCoord = grid.IndexToCube(cellIndex);
             BiomeType cellValue = (BiomeType)grid.GetCell(cellCoord);
@@ -235,7 +235,7 @@ public class WorldManager : MonoBehaviour
                 }
             }
         }
-        for (int cellIndex = 0; (cellIndex < grid.size()); cellIndex++)
+        for (int cellIndex = 0; (cellIndex < grid.GetCellCount()); cellIndex++)
         {
             cellCoord = grid.IndexToCube(cellIndex);
             BiomeType cellValue = (BiomeType)grid.GetCell(cellCoord);
@@ -272,7 +272,7 @@ public class WorldManager : MonoBehaviour
             int baseChance = Mathf.Max(10 - pass * 2, 0); //Decreasing base chance each pass
             int perDeepForestChance = Mathf.RoundToInt(0 + Mathf.Pow(pass, 1.75f)); //Increasing chance per adjacent deep forest each pass
 
-            for (int cellIndex = 0; (cellIndex < grid.size()); cellIndex++)
+            for (int cellIndex = 0; (cellIndex < grid.GetCellCount()); cellIndex++)
             {
                 cellCoord = grid.IndexToCube(cellIndex);
                 BiomeType cellValue = (BiomeType)grid.GetCell(cellCoord);
@@ -322,7 +322,7 @@ public class WorldManager : MonoBehaviour
         int[] cell = new int[7]; //Base biome + 6 edges
         Vector3Int[] neighbours = new Vector3Int[6];
         //The replacement for what we do in the fetch function, but done at world gen time instead of every frame
-        for (int i = 0; i < grid.size(); i++)
+        for (int i = 0; i < grid.GetCellCount(); i++)
         {
             Vector3Int cellCoord = grid.IndexToCube(i);
             //ulong packedTile = grid.(cellCoord);
@@ -439,114 +439,6 @@ public class WorldManager : MonoBehaviour
             grid.SetCellBin(cellCoord, tilePacker.packedTile, tilePacker.cornerBlends);
         }
 
-        //Super inefficient. We'll have to do it in batches, but that's for my optimization time.
-        for (int cellIndex = 0; cellIndex < grid.size(); cellIndex++)
-        {
-            Vector3Int coords = grid.IndexToCube(cellIndex);
-            Vector3Int[] neighborCoords = new Vector3Int[6];
-
-            int cellVal = grid.GetCell(coords);
-            if (cellVal == -1)
-                continue;
-
-            grid.GetNeighbourCoords(coords, ref neighborCoords);
-
-            int neighbor1Index = 5; //The top left neighbor, we'll need to handle wrapping
-            int neighbor2Index = 1; //The right neighbor
-            int neighbor1CheckIndex = 1; //The edge index to check on neighbor 1
-            int neighbor2CheckIndex = 5; //The edge index to check on neighbor 2
-
-            tilePacker.SetPackedTile(grid.GetCellData(coords));
-            int[] mainBiomes = (int[])tilePacker.biomes.Clone();
-            (bool blend, bool sameIndex)[] mainCornerBlends = new (bool, bool)[6];
-            for (int c = 0; c < 6; c++)
-                mainCornerBlends[c] = (false, false);
-
-            for (int edgeIndex = 0; edgeIndex < 6; edgeIndex++)
-            {
-                Vector3Int neighborCoord = neighborCoords[neighbor1Index]; //The coord of the neighbour in the world
-                HexData hexData = grid.GetCellData(neighborCoord);
-                int[] neighbor1Biomes = new int[7];
-                ulong neighborTileID = hexData.ID;
-                if (neighborTileID != ulong.MaxValue)
-                {
-                    tilePacker.SetPackedTile(hexData);
-                    neighbor1Biomes = (int[])tilePacker.biomes.Clone();
-                }
-                else
-                    neighbor1Biomes = null;
-
-                neighborCoord = neighborCoords[neighbor2Index];
-                hexData = grid.GetCellData(neighborCoord);
-                int[] neighbor2Biomes = new int[7];
-                neighborTileID = hexData.ID;
-                if (neighborTileID != ulong.MaxValue)
-                {
-                    tilePacker.SetPackedTile(hexData);
-                    neighbor2Biomes = (int[])tilePacker.biomes.Clone();
-                }
-                else
-                    neighbor2Biomes = null;
-
-                //Set the corner to a debug material if it's the first corner, just to make sure we're at least setting it correctly. We can remove this later, but for now it's a good way to test if we're doing the right thing.
-                //if (edgeIndex == 0)
-                //    mainCornerBlends[edgeIndex] = (true, false);
-                bool areConnectedEdgesTheSame = true; //If the two edges are the same, and we're meant to blend, don't bother.
-                int edgeCheck = (edgeIndex + 3) % 6;
-                int neighborCheckIndex = edgeIndex;
-                neighborCoord = neighborCoords[neighborCheckIndex];
-                int[] neighborBiomes = new int[7];
-                //hexData = grid.GetCellData(neighborCoord);
-                if (hexData.ID != ulong.MaxValue)
-                {
-                    tilePacker.SetPackedTile(hexData);
-                    neighborBiomes = (int[])tilePacker.biomes.Clone();
-                }
-                else
-                    neighborBiomes = null;
-
-                //if (hexData.ID != ulong.MaxValue && hexData.ID != 0 && hexData.ID != 17895697 && hexData.ID != 53687091 && hexData.ID != 71582788)
-                //{
-                //    int bp = 1;
-                //}
-
-
-                if (neighborBiomes != null)
-                    areConnectedEdgesTheSame = (mainBiomes[edgeIndex + 1] == neighborBiomes[edgeCheck + 1]); //Have to add one because of the core
-                areConnectedEdgesTheSame = false;
-                //TODO: Test some corners with the debug material. Make sure we're doing the right thing here.
-                if (neighbor1Biomes != null)
-                {
-                    if ((mainBiomes[edgeIndex + 1] == neighbor1Biomes[neighbor1CheckIndex + 1]) && !areConnectedEdgesTheSame)// || mainBiomes[edgeIndex + 1] == neighbor1Biomes[((neighbor1CheckIndex + 1) % 6) + 1])) //Have to add one because of the core
-                    {
-                        mainCornerBlends[neighbor1Index] = (true, false); //blend the left corner. We need to blend a different index because it's technically assigned to a different index, but it blends with OUR index.
-                    }
-                }
-                if (neighbor2Biomes != null)
-                {
-                    if ((mainBiomes[edgeIndex + 1] == neighbor2Biomes[neighbor2CheckIndex + 1]) && !areConnectedEdgesTheSame)// || mainBiomes[edgeIndex + 1] == neighbor2Biomes[((neighbor2CheckIndex + 5) % 6) + 1])) //Have to add one because of the core
-                    {
-                        //if (mainCornerBlends[edgeIndex].blend != true) //Don't overwright
-                        //{
-                        mainCornerBlends[edgeIndex] = (true, true); //blend the right corner. (For my own peace of mind, (true, false) is translates to (true = yes blend, false = same index as edge)
-                        //}
-                    }
-                }
-
-                //Increment
-                neighbor1Index = (neighbor1Index + 1) % 6;
-                neighbor2Index = (neighbor2Index + 1) % 6;
-                neighbor1CheckIndex = (neighbor1CheckIndex + 1) % 6;
-                neighbor2CheckIndex = (neighbor2CheckIndex + 1) % 6;
-
-            }
-
-            //Update the tile with the new corner blends
-            tilePacker.SetBlends(mainCornerBlends);
-            tilePacker.SetBiomes(mainBiomes);
-            grid.SetCellBin(coords, tilePacker.packedTile, tilePacker.cornerBlends);
-        }
-
         return grid;
     }
 
@@ -566,14 +458,14 @@ public class WorldManager : MonoBehaviour
     {
         //Start by picking random places to put lakes. These will be clusters of water tiles surrounded by land.
         //We'll aim for x lakes per 1000 tiles, so lakeDensity controls how many lakes we try to spawn
-        int lakeSpawns = Mathf.FloorToInt(world.size() / 1000) * lakeDensity;
+        int lakeSpawns = Mathf.FloorToInt(world.GetCellCount() / 1000) * lakeDensity;
         List<int> viableLakeSpotsBuffer = new List<int>();
-        HexGrid riverLakesLayer = new HexGrid(grid.dimensions().x, grid.dimensions().y);
+        HexGrid riverLakesLayer = new HexGrid(grid.GetDimensions().x, grid.GetDimensions().y);
         Vector3Int[] neighbors = new Vector3Int[6];
 
         //We'll convert the grid to a more usable format for this. If we add more ground types that can be a lake, we need to update here.
         Vector3Int cellCoord = new Vector3Int();
-        for (int cellIndex = 0; cellIndex < grid.size(); cellIndex++)
+        for (int cellIndex = 0; cellIndex < grid.GetCellCount(); cellIndex++)
         {
             cellCoord = grid.IndexToCube(cellIndex);
             BiomeType cellValue = (BiomeType)grid.GetCell(cellCoord);
@@ -608,7 +500,6 @@ public class WorldManager : MonoBehaviour
                 riverLakesLayer.SetCell(cellCoord, 0); //Water or other
             }
         }
-        //Vector3Int[] neighbors = new Vector3Int[6];
         //Now we spawn the lakes, we'll set them to 2 in the riverLakesLayer
         for (int i = 0; i < lakeSpawns; i++)
         {
@@ -648,7 +539,7 @@ public class WorldManager : MonoBehaviour
                 riverLakesLayer.SetCell(expandCoord, 2); //Lake
                 while (expansionSpots.Contains(expandCoord))
                     expansionSpots.Remove(expandCoord);// A bit gross, but it's during load. If we need to we can optimize later
-                viableLakeSpotsBuffer.Remove(grid.OddRToIndex(expandCoord));
+                viableLakeSpotsBuffer.Remove(grid.CubeToIndex(expandCoord));
 
                 //Add new expansion spots
                 riverLakesLayer.GetNeighbourCoords(expandCoord, ref neighbors);
@@ -669,7 +560,7 @@ public class WorldManager : MonoBehaviour
             for (int n = 0; n < expansionSpots.Count; n++)
             {
                 Vector3Int lCoord = expansionSpots[n];
-                int lCellIndex = grid.OddRToIndex(lCoord);
+                int lCellIndex = grid.CubeToIndex(lCoord);
                 if (viableLakeSpotsBuffer.Contains(lCellIndex))
                 {
                     viableLakeSpotsBuffer.Remove(lCellIndex);
@@ -680,7 +571,7 @@ public class WorldManager : MonoBehaviour
 
         //Now for Rivers. We'll start my making a list of river spawn locations. These are lakes that are adjacent to land tiles.
         List<Vector3Int> RiverSpawnLocations = new List<Vector3Int>();
-        for (int lakeIndex = 0; lakeIndex < riverLakesLayer.size(); lakeIndex++)
+        for (int lakeIndex = 0; lakeIndex < riverLakesLayer.GetCellCount(); lakeIndex++)
         {
             cellCoord = riverLakesLayer.IndexToCube(lakeIndex);
             int cellValue = riverLakesLayer.GetCell(cellCoord);
@@ -866,12 +757,15 @@ public class WorldManager : MonoBehaviour
                             int cIndex = enteranceCorner; //For testing, I'm swapping the home and offRamp corners
                             tilePacker.SetPackedTile(grid.GetCellData(riverCarver));
                             int[] biomes = (int[])tilePacker.biomes.Clone();
+                            (bool, bool)[] cornerFlags = ((bool, bool)[])tilePacker.edgeBlends.Clone();
                             while (cIndex != cornerIndex) 
                             {
                                 biomes[((cIndex + 1) % 6) + 1] = (int)BiomeType.Water; //Set the edge to water
+                                cornerFlags[((cIndex + 1) % 6)] = (false, false);
                                 cIndex = (cIndex + 1) % 6;
                             }
                             tilePacker.SetBiomes(biomes);
+                            tilePacker.SetBlends(cornerFlags);
                             grid.SetCellBin(riverCarver, tilePacker.packedTile, tilePacker.cornerBlends);
                         }
                         else
@@ -879,12 +773,15 @@ public class WorldManager : MonoBehaviour
                             int cIndex = enteranceCorner;
                             tilePacker.SetPackedTile(grid.GetCellData(riverCarver));
                             int[] biomes = (int[])tilePacker.biomes.Clone();
+                            (bool, bool)[] cornerFlags = ((bool, bool)[])tilePacker.edgeBlends.Clone();
                             while (cIndex != cornerIndex)
                             {
                                 biomes[((cIndex + 6) % 6) + 1] = (int)BiomeType.Water; //Set the edge to water
+                                cornerFlags[((cIndex + 1) % 6)] = (false, false);
                                 cIndex = (cIndex + 5) % 6;
                             }
                             tilePacker.SetBiomes(biomes);
+                            tilePacker.SetBlends(cornerFlags);
                             grid.SetCellBin(riverCarver, tilePacker.packedTile, tilePacker.cornerBlends);
                         }
                         riverPath.Add(riverCarver);
@@ -915,17 +812,17 @@ public class WorldManager : MonoBehaviour
                     }
                 }
             }
-            for (int r = 0; r < riverPath.Count; r++)
-            {
-                Debug.Log("River Tile: " + riverPath[r] + " via corner " + riverPathCorners[r]);
-            }
+            //for (int r = 0; r < riverPath.Count; r++)
+            //{
+            //    Debug.Log("River Tile: " + riverPath[r] + " via corner " + riverPathCorners[r]);
+            //}
 
             //riverActive = false; //Test to see if it works so far
         }
 
 
         //For the time being, lets see what this looks like. Combine the layers, anything labled as 2 becomes a water tile in the main grid
-        for (int cellIndex = 0; cellIndex < grid.size(); cellIndex++)
+        for (int cellIndex = 0; cellIndex < grid.GetCellCount(); cellIndex++)
         {
             cellCoord = grid.IndexToCube(cellIndex);
             int lakeCellValue = riverLakesLayer.GetCell(cellCoord);
@@ -941,132 +838,196 @@ public class WorldManager : MonoBehaviour
         return grid;
     }
 
-    //public Material[] fetch(Vector2Int bottomLeft, Vector2Int size)
-    //{
-    //    if (viewBuffer == null || viewBuffer.Length != size.x * size.y * 7)
-    //    {
-    //        viewBuffer = new Material[size.x * size.y * 7];
-    //    }
-    //    int cellValue = -1;
-    //    Vector3Int cellCoord = new Vector3Int();
-    //    Vector3Int[] neighbours = new Vector3Int[6];
-    //    int baseMatIndex = 0;
-    //    for (int y = bottomLeft.y; y < bottomLeft.y + size.y; y++)
-    //    {
-    //        for (int x = bottomLeft.x; x < bottomLeft.x + size.x; x++)
-    //        {
-    //            cellCoord = world.OddRToCube(x, y);
-    //            cellValue = world.GetCell(cellCoord);
-    //            //int cellValue = world.GetCell(x, y);
-    //            baseMatIndex = ((y - bottomLeft.y) * size.x + (x - bottomLeft.x)) * 7;
-    //            //For each tile, the base material is first, then the 6 edge materials clockwise starting from NE
-    //            //Material[] mats = new Material[7];
-    //            if (cellValue == -1)
-    //            {
-    //                //Invalid cell
-    //                for (int i = 0; i < 7; i++)
-    //                {
-    //                    viewBuffer[baseMatIndex + i] = null;
-    //                }
-    //                continue;
-    //            }
-    //            for (int i = 0; i < 7; i++)
-    //            {
-    //                viewBuffer[baseMatIndex + i] = matList[cellValue]; //Default the whole tile to the base material
-    //            }
+    //A one and done version of the blending logic, so I'm not repeating code everywhere.
+    //We'll use one or the other list, not both. If there's no whitelist, we allow all except what's in the blacklist.
+    private HexGrid Blend(HexGrid grid, BiomeType[] coreBlackList = null, BiomeType[] edgeBlackList = null, BiomeType[] coreWhiteList = null, BiomeType[] edgeWhiteList = null)
+    {
+        for (int cellIndex = 0; cellIndex < grid.GetCellCount(); cellIndex++)
+        {
+            Vector3Int coords = grid.IndexToCube(cellIndex);
+            tilePacker.SetPackedTile(grid.GetCellData(coords));
+            int[] mainBiomes = (int[])tilePacker.biomes.Clone();
+            Vector3Int bpCoords = new Vector3Int(-11, -68, 79);
+            int bp = 0;
+            if (coords == bpCoords)
+            {
+                bp = 1;
+            }
 
-    //            //TODO: Do this in world gen instead, so We don't have to do these lookups every time the tile materials are fetched
-    //            //Lookup border tiles. Then we can set the edge materials accordingly
-    //            BiomeType biomeType = (BiomeType)cellValue;
-    //            if (biomeType != BiomeType.Desert) //Skip the desert for now
-    //            {
-    //                world.GetNeighbourCoords(cellCoord, ref neighbours);
-    //                for (int n = 0; n < neighbours.Length; n++)
-    //                {
-    //                    Vector3Int nCoord = neighbours[n];
-    //                    int nCellValue = world.GetCell(nCoord);
-    //                    if (nCellValue == -1)
-    //                        continue;
-    //                    BiomeType nBiomeType = (BiomeType)nCellValue;
-    //                    if (nBiomeType != biomeType)
-    //                    {
-    //                        //These are the edge cases, and where we add more edges as the world gets more biomes
-    //                        switch (biomeType)
-    //                        {
-    //                            case BiomeType.Water:
-    //                                switch (nBiomeType)
-    //                                {
-    //                                    case BiomeType.Grass:
-    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
-    //                                        break;
-    //                                    case BiomeType.LightForest:
-    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
-    //                                        break;
-    //                                    case BiomeType.Beach:
-    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
-    //                                        break;
-    //                                }
-    //                                break;
-    //                            case BiomeType.Grass:
-    //                                switch (nBiomeType)
-    //                                {
-    //                                    case BiomeType.Water:
-    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
-    //                                        break;
-    //                                    case BiomeType.Beach:
-    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
-    //                                        break;
-    //                                }
-    //                                break;
-    //                            case BiomeType.Beach:
-    //                                switch (nBiomeType)
-    //                                {
-    //                                    case BiomeType.Water:
-    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
-    //                                        break;
-    //                                    case BiomeType.Shallows:
-    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Shallows];
-    //                                        break;
-    //                                }
-    //                                break;
-    //                            case BiomeType.Shallows:
-    //                                switch (nBiomeType)
-    //                                {
-    //                                    case BiomeType.Grass:
-    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
-    //                                        break;
-    //                                }
-    //                                break;
-    //                            case BiomeType.Forest:
-    //                                switch (nBiomeType)
-    //                                {
-    //                                    case BiomeType.Grass:
-    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.LightForest];
-    //                                        break;
-    //                                }
-    //                                break;
-    //                            case BiomeType.LightForest:
-    //                                switch (nBiomeType)
-    //                                {
-    //                                    case BiomeType.Water:
-    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
-    //                                        break;
-    //                                    case BiomeType.Grass:
-    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Grass];
-    //                                        break;
-    //                                    case BiomeType.Shallows:
-    //                                        viewBuffer[baseMatIndex + n + 1] = matList[(int)BiomeType.Beach];
-    //                                        break;
-    //                                }
-    //                                break;
-    //                        }
-    //                    }
-    //                }
-    //            }
-    //        }
-    //    }
-    //    return viewBuffer;
-    //}
+
+            //White & Blacklisting
+            if (coreWhiteList == null)
+            {
+                if (coreBlackList != null)
+                {
+                    if (coreBlackList.Contains((BiomeType)mainBiomes[0]))
+                    {
+                        continue;
+                    }
+                }
+            }
+            //Otherwise, if both are null, we allow everything.
+            else
+            {
+                if (coreWhiteList.Length != 0)
+                {
+                    if (coreBlackList != null)
+                    {
+                        if (coreBlackList.Contains((BiomeType)mainBiomes[0]) || !coreWhiteList.Contains((BiomeType)mainBiomes[0]))
+                        {
+                            continue;
+                        }
+                    }
+                    else if (!coreWhiteList.Contains((BiomeType)mainBiomes[0]))
+                    {
+                        continue;
+                    }
+                }
+            }
+
+            Vector3Int[] neighborCoords = new Vector3Int[6];
+
+            int cellVal = grid.GetCell(coords);
+            if (cellVal == -1)
+                continue;
+
+            grid.GetNeighbourCoords(coords, ref neighborCoords);
+
+
+            int neighbor1Index = 5; //The top left neighbor, we'll need to handle wrapping
+            int neighbor2Index = 1; //The right neighbor
+            int neighbor1CheckIndex = 1; //The edge index to check on neighbor 1
+            int neighbor2CheckIndex = 5; //The edge index to check on neighbor 2
+
+            (bool blend, bool sameIndex)[] mainCornerBlends = ((bool blend, bool sameIndex)[])tilePacker.edgeBlends.Clone();
+
+            for (int edgeIndex = 0; edgeIndex < 6; edgeIndex++)
+            {
+                if (edgeIndex == 4)
+                    bp = 2;
+                //White & Blacklisting
+                bool pass = false;
+                if (edgeWhiteList == null)
+                {
+                    if (edgeBlackList != null)
+                    {
+                        if (edgeBlackList.Contains((BiomeType)mainBiomes[edgeIndex + 1]))
+                        {
+                            pass = true;
+                        }
+                    }
+                }
+                //Otherwise, if both are null, we allow everything.
+                else
+                {
+                    if (edgeWhiteList.Length != 0)
+                    {
+                        if (edgeBlackList != null)
+                        {
+                            if (edgeBlackList.Contains((BiomeType)mainBiomes[edgeIndex + 1]) || !edgeWhiteList.Contains((BiomeType)mainBiomes[edgeIndex + 1]))
+                            {
+                                pass = true;
+                            }
+                        }
+                        else if (!edgeWhiteList.Contains((BiomeType)mainBiomes[edgeIndex + 1]))
+                        {
+                            pass = true;
+                        }
+                    }
+                }
+
+                if (pass)
+                {
+                    neighbor1Index = (neighbor1Index + 1) % 6;
+                    neighbor2Index = (neighbor2Index + 1) % 6;
+                    neighbor1CheckIndex = (neighbor1CheckIndex + 1) % 6;
+                    neighbor2CheckIndex = (neighbor2CheckIndex + 1) % 6;
+                    continue;
+                }
+
+                Vector3Int neighborCoord = neighborCoords[neighbor1Index]; //The coord of the neighbour in the world
+                HexData hexData = grid.GetCellData(neighborCoord);
+                int[] neighbor1Biomes = new int[7];
+                ulong neighborTileID = hexData.ID;
+                if (neighborTileID != ulong.MaxValue)
+                {
+                    tilePacker.SetPackedTile(hexData);
+                    neighbor1Biomes = (int[])tilePacker.biomes.Clone();
+                }
+                else
+                    neighbor1Biomes = null;
+
+                neighborCoord = neighborCoords[neighbor2Index];
+                hexData = grid.GetCellData(neighborCoord);
+                int[] neighbor2Biomes = new int[7];
+                neighborTileID = hexData.ID;
+                if (neighborTileID != ulong.MaxValue)
+                {
+                    tilePacker.SetPackedTile(hexData);
+                    neighbor2Biomes = (int[])tilePacker.biomes.Clone();
+                }
+                else
+                    neighbor2Biomes = null;
+
+                bool areConnectedEdgesTheSame = true; //If the two edges are the same, and we're meant to blend, don't bother.
+                int edgeCheck = (edgeIndex + 3) % 6;
+                int neighborCheckIndex = edgeIndex;
+                neighborCoord = neighborCoords[neighborCheckIndex];
+                int[] neighborBiomes = new int[7];
+                //hexData = grid.GetCellData(neighborCoord);
+                if (hexData.ID != ulong.MaxValue)
+                {
+                    tilePacker.SetPackedTile(hexData);
+                    neighborBiomes = (int[])tilePacker.biomes.Clone();
+                }
+                else
+                    neighborBiomes = null;
+
+
+
+                if (neighborBiomes != null)
+                    areConnectedEdgesTheSame = (mainBiomes[edgeIndex + 1] == neighborBiomes[edgeCheck + 1]); //Have to add one because of the core
+                areConnectedEdgesTheSame = false;
+                if (neighbor1Biomes != null)
+                {
+                    /* If:
+                    * Edge Biome == Neighbor1 Edge check Biome, OR Edge Biome == Neighbor1 Edge check Biome + 1
+                    * AND the connected edges aren't the same
+                    * AND the two edges sharing the corner aren't the same biome.
+                    */
+                    if (((mainBiomes[edgeIndex + 1] == neighbor1Biomes[neighbor1CheckIndex + 1]) || mainBiomes[edgeIndex + 1] == neighbor1Biomes[((neighbor1CheckIndex + 1) % 6) + 1]) && !areConnectedEdgesTheSame && (mainBiomes[edgeIndex + 1] != mainBiomes[(edgeIndex + 5) % 6]))
+                    {
+                        mainCornerBlends[neighbor1Index] = (true, false); //blend the left corner. We need to blend a different index because it's technically assigned to a different index, but it blends with OUR index.
+                    }
+                }
+                if (neighbor2Biomes != null)
+                {
+                    /* If:
+                    * Edge Biome == Neighbor2 Edge check Biome, OR Edge Biome == Neighbor2 Edge check Biome - 1
+                    * AND the connected edges aren't the same
+                    * AND the two edges sharing the corner aren't the same biome.
+                    */
+                    if (((mainBiomes[edgeIndex + 1] == neighbor2Biomes[neighbor2CheckIndex + 1]) || mainBiomes[edgeIndex + 1] == neighbor2Biomes[((neighbor2CheckIndex + 5) % 6) + 1]) && !areConnectedEdgesTheSame && (mainBiomes[edgeIndex + 1] != mainBiomes[(edgeIndex + 1) % 6 + 1]))
+                    {
+                        mainCornerBlends[edgeIndex] = (true, true); //blend the right corner. (For my own peace of mind, (true, false) is translates to (true = yes blend, false = same index as edge)
+                    }
+                }
+
+                //Increment
+                neighbor1Index = (neighbor1Index + 1) % 6;
+                neighbor2Index = (neighbor2Index + 1) % 6;
+                neighbor1CheckIndex = (neighbor1CheckIndex + 1) % 6;
+                neighbor2CheckIndex = (neighbor2CheckIndex + 1) % 6;
+
+            }
+
+            //Update the tile with the new corner blends
+            tilePacker.SetBlends(mainCornerBlends);
+            tilePacker.SetBiomes(mainBiomes);
+            grid.SetCellBin(coords, tilePacker.packedTile, tilePacker.cornerBlends);
+        }
+        return grid;
+    }
 
     public Material[] fetch(Vector3Int[] coords) //Fetch by list of coordinates, lighter for scrolling.
     {

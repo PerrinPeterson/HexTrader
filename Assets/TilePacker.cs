@@ -1,6 +1,12 @@
 using UnityEngine;
 
-//A way to easily pack the tile data into a ulong for light storage and retrieval
+/* Created Perrin Peterson, Copyright 2025
+ * 
+ * Class designed to pack information into a lighter storage system.
+ * Specifically, packs biome data for 7 segments of a hexagon into a single ulong,
+ * and packs the edge blending flags for each segment into a ushort.
+ * This makes the storage per tile is 16 bytes, which is way better than an array of ints and bools.
+ */
 public class TilePacker
 {
     public int[] biomes;
@@ -8,11 +14,12 @@ public class TilePacker
     private int maxBiomes;
     public ulong packedTile;
     public ushort cornerBlends; // 2 bits per corner, 00 = no blend, 10 = blend with the same edge index, 11 = blend with the next edge index.
-    private int TileSize = 7; //Number of biomes per tile
-    public TilePacker(int[] Biomes, int MaxBiomes, (bool isBlend, bool isSameIndex)[] edgeBlends)
+    private const int c_tileSize = 7; //Number of biomes per tile
+
+    public TilePacker(int[] biomes, int maxBiomes, (bool isBlend, bool isSameIndex)[] edgeBlends)
     {
-        biomes = Biomes; //The biomes of the tile
-        maxBiomes = MaxBiomes; //The number of biomes in the game. So we can shave down the data size
+        this.biomes = biomes; //The biomes of the tile
+        this.maxBiomes = maxBiomes; //The number of biomes in the game. So we can shave down the data size
         this.edgeBlends = edgeBlends;
         Pack();
     }
@@ -102,11 +109,10 @@ public class TilePacker
         cornerBlends = cornerFlags;
     }
 
-    //New addition, we'll tack on the corners. The last 6 indexes will be the corners.
     public void Unpack()
     {
         int bitsPerBiome = Mathf.CeilToInt(Mathf.Log(maxBiomes, 2));
-        int[] unpackedBiomes = new int[TileSize];
+        int[] unpackedBiomes = new int[c_tileSize];
 
         (bool isBlend, bool isSameIndex)[] unpackedBlends = new (bool, bool)[6];
 
